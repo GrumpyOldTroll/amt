@@ -1,0 +1,62 @@
+$Id: README-LINUX,v 1.1.2.10 2007/05/31 17:20:13 sachin Exp $
+Automatic Multicast without Explicit Tunnels (AMT)
+
+AMT provides a way for a host, proxy, or router on a non-multicast
+capable network to join multicast groups on a remote multicast
+capable network through a relay on that network.
+
+AMT is the product of the MBONED Working Group of the Operations
+and Management Area of the IETF.  More information about the MBONED
+Working group can be found at
+http://www.ietf.org/html.charters/mboned-charter.html.
+
+The lastest version of the internet-draft describing this protocol
+at the time of this release are provided in this distribution. Later
+versions of the draft or an RFC of this protocol may be found at
+the IETF location above.
+
+This distribution provides AMT relay and AMT gateway implementations.
+It was developed using FreeBSD 4 and FreeBSD 5. Porting to other
+similar operating systems should require only minor modifications.
+The gateway in particular uses the tun pseudo-interface driver
+which may require modifications for porting.  The relay uses some
+low-level socket options that may require changes for use on other
+similar operating systems.
+
+The current AMT release is supported on Linux kernel version 2.6.18. 
+The current release also supports AMT draft version 7 changes.
+The implementation is dependant on following libraries:
+1. libpcap
+2. libevent
+
+These libraries need to be installed before configuring AMT and be on 
+the standard library include path or their path needs to be set
+in environment variable like LD_LIBRARY_PATH. 
+
+To build the code follow configure and make procedure. 
+
+To start AMT gateway use the following command:
+$ gateway/amtgwd -a <relay anycast addr> -s <subnet anycast prefix>/<prefix len>
+
+To start AMT relay use the following command:
+$ relay/amtrelayd -a <relay anycast addr>/<prefix len>
+
+This release also has a new debug feature. The gateway can be started
+in a debug mode by using the command line option -d. The gateway starts
+a debug server on port 59999 by default or the port can be customized
+by setting the environment variable AMT_DEBUG_PORT. Server can be accessed
+through a telnet client (with the port specified for the debug server).
+A command prompt is displayed on the telnet client. Type 'help' to list all 
+the supported commands.
+
+This version works in association with an IGMP proxy "gproxy". The TUN 
+interface (usually tun0) should be configured as the proxy upstream interface.
+The gateway should be running before starting the gproxy.
+
+Currently open issues:
+1. fprintf -> syslog
+2. Carefully go through daemonize code and close file descriptors.
+3. SIGINT needs to dump stats
+4. XMLRPC interface for management
+5. get mtu and allocate packet buffer based on mtu size
+6. check for memory leaks (I know there is at least one).

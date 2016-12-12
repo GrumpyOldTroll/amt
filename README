@@ -1,0 +1,44 @@
+$Id: README,v 1.1.1.8 2007/05/09 20:40:42 sachin Exp $
+
+Copyright (c) 2004-2005, Juniper Networks, Inc.
+All rights reserved.
+
+Automatic Multicast without Explicit Tunnels (AMT)
+
+AMT provides a way for a host, proxy, or router on a non-multicast
+capable network to join multicast groups on a remote multicast
+capable network through a relay on that network.
+
+AMT is the product of the MBONED Working Group of the Operations
+and Management Area of the IETF.  More information about the MBONED
+Working group can be found at
+http://www.ietf.org/html.charters/mboned-charter.html.
+
+The lastest version of the internet-draft describing this protocol
+at the time of this release are provided in this distribution. Later
+versions of the draft or an RFC of this protocol may be found at
+the IETF location above.
+
+This distribution provides AMT relay and AMT gateway implementations.
+It was developed using FreeBSD 4 and FreeBSD 5. Porting to other
+similar operating systems should require only minor modifications.
+The gateway in particular uses the tun(4) pseudo-interface driver
+which may require modifications for porting.  The relay uses some
+low-level socket options that may require changes for use on other
+similar operating systems.
+
+Funding for this work was provided by Juniper Networks, Inc.
+More information about Juniper Networks, Inc. can be found at
+http://www.juniper.net.
+
+Currently open issues:
+
+1. Deal with this error correctly when the relay shuts down
+    amtgwd: recv relay communication trouble: Connection refused
+2. fprintf -> syslog
+3. Carefully go through daemonize code and close file descriptors.
+4. periodic IGMP queries/timeout through some stateful firewalls
+5. SIGINT needs to dump stats
+6. XMLRPC interface for management
+7. get mtu and allocate packet buffer based on mtu size
+8. check for memory leaks (I know there is at least one).

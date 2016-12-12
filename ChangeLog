@@ -1,0 +1,25 @@
+2006-11-29  1.1.0
+	Ported the code for linux
+	Initial release to users/testers
+2005-05-13	0.1.3
+	Add http support to relay to allow querying state
+	The following commands are now available
+	    curl http://your.relay.net:8080/show-memory
+	    curl http://your.relay.net:8080/show-stats
+	    curl http://your.relay.net:8080/show-streams
+	This is not really meant for direct access but can be used for now.
+	In the future, it will provide XML or YAML and a scripting language
+	can be used to pretty print the info.
+2005-05-04	0.1.2
+	Replace ISC eventlib with libevent from Niels Provos
+		(http://www.monkey.org/~provos/libevent/)
+	Replace ISC linked list with BSD queue(3)
+	Add immediate mode on BPF used by libpcap under BSD
+	Fixed problem with the size of dynamic memory allocation of two objects
+		in the relay.
+2005-04-21	0.1.1
+	No BUG ID - Fixed problem on relay looking up gateway address
+
+2005-04-18	0.1
+	Initial release to select testers
+
