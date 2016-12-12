@@ -112,9 +112,9 @@ membership_leave(sgnode *sg)
 {
     int rc = 0;
     struct ip_mreq  imr;
-    relay_instance *instance;
+    // relay_instance *instance;
 
-    instance = sg->sg_instance;
+    // instance = sg->sg_instance;
 
     /*
      * Drop the source/group membership

@@ -281,7 +281,11 @@ gw_event_dbg_client(int fd, short __unused flags, void *uap)
 	return;
     }
     else if (rc == 0) {
-        write(fd, "[amtgwd]# ", 10);
+        rc = write(fd, "[amtgwd]# ", 10);
+        if (rc < 0) {
+            fprintf(stderr, "%s: write error(1) from debug client: %s\n", 
+		        gw->name, strerror(errno));
+        }
     }
     else {
 	char *pstr = dbg_buffer;
@@ -355,7 +359,11 @@ gw_event_dbg_client(int fd, short __unused flags, void *uap)
 	    nbytes += sprintf(pstr, "Unknown Command\n");
 	}
 	nbytes += sprintf(pstr + nbytes, "[amtgwd]# "); 
-	write(fd, pstr, nbytes);
+	rc = write(fd, pstr, nbytes);
+    if (rc < 0) {
+        fprintf(stderr, "%s: write error from debug client: %s\n", 
+		    gw->name, strerror(errno));
+    }
     }
 }
 
@@ -380,7 +388,11 @@ gw_event_debug(int fd, short __unused flags, void *uap)
 	return;
     }
 
-    write(s, "[amtgwd]# ", 10);
+    rc = write(s, "[amtgwd]# ", 10);
+    if (rc < 0) {
+        fprintf(stderr, "%s: event write error from debug client: %s\n", 
+		    gw->name, strerror(errno));
+    }
 
     rc = socket_set_non_blocking(s);
     if (rc < 0) {

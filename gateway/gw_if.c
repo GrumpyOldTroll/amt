@@ -365,8 +365,8 @@ read_sock(int sockFd, char *bufPtr, int seqNum, int pId)
 
 	/* check for error packet */
 	if (nlHdr->nlmsg_type == NLMSG_ERROR) {
-	    struct nlmsgerr *errHdr;
-	    errHdr = (struct nlmsgerr *) NLMSG_DATA(nlHdr);
+	    // struct nlmsgerr *errHdr;
+	    // errHdr = (struct nlmsgerr *) NLMSG_DATA(nlHdr);
 	    return -1;
 	}
 
@@ -432,9 +432,9 @@ static int
 get_if_addr(int sock, char *interface, int *if_index, struct sockaddr_in *sin,
 			struct sockaddr_in *unicast_addr)
 {
-    struct ifaddrmsg *addrMsg;
+    // struct ifaddrmsg *addrMsg;
     struct nlmsghdr *nlMsg;
-    struct ifinfomsg *linkMsg;
+    // struct ifinfomsg *linkMsg;
     char msgBuf[NL_BUFSIZE];
     int len;
     static int msgSeq = 0;
@@ -444,7 +444,7 @@ get_if_addr(int sock, char *interface, int *if_index, struct sockaddr_in *sin,
     memset(msgBuf, 0, NL_BUFSIZE);
 
     nlMsg = (struct nlmsghdr *)msgBuf;
-    linkMsg = (struct ifinfomsg *)NLMSG_DATA(nlMsg);
+    // linkMsg = (struct ifinfomsg *)NLMSG_DATA(nlMsg);
 
     /* For getting interface addresses */
     nlMsg->nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
@@ -478,7 +478,7 @@ get_if_addr(int sock, char *interface, int *if_index, struct sockaddr_in *sin,
     memset(msgBuf, 0, NL_BUFSIZE);
 
     nlMsg = (struct nlmsghdr *)msgBuf;
-    addrMsg = (struct ifaddrmsg *)NLMSG_DATA(nlMsg);
+    // addrMsg = (struct ifaddrmsg *)NLMSG_DATA(nlMsg);
 
     /* For getting interface addresses */
     nlMsg->nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
@@ -725,6 +725,7 @@ init_address(gw_t *gw)
  * determine the local address that is going to be used when
  * communicating with the relay.
  */
+/*
 int
 gw_local_addr_get(gw_t *gw)
 {
@@ -739,6 +740,7 @@ gw_local_addr_get(gw_t *gw)
 
     return 0;
 }
+*/
 
 #ifdef BSD
 static int

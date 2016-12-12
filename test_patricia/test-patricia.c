@@ -36,6 +36,7 @@ static const char __attribute__((unused)) id[] = "@(#) $Id: test-patricia.c,v 1.
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "pat.h"
 
@@ -50,7 +51,7 @@ typedef struct _mynode {
 static inline mynode *
 pat2my (patext *ext)
 {
-    return((mynode *)((int) ext - offsetof(mynode, extkey)));
+    return((mynode *)((intptr_t) ext - offsetof(mynode, extkey)));
 }
 
 void

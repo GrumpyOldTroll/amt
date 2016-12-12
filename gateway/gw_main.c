@@ -264,7 +264,12 @@ main (int argc, char **argv)
 
     /* child or foreground */
 
-    chdir(_PATH_VARTMP);
+    rc = chdir(_PATH_VARTMP);
+    if (rc < 0) {
+	fprintf(stderr, "%s: Can't chdir(%s): %s.\n", gw.name,
+		_PATH_VARTMP, strerror(errno));
+	exit(1);
+    }
 
     gw.gw_context = event_init();
     if (gw.gw_context == NULL) {

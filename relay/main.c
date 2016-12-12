@@ -201,7 +201,8 @@ relay_socket_shared_init(int family, struct sockaddr *bind_addr,
 void
 relay_url_init(relay_instance *instance)
 {
-    int rc, val, len, salen, sock;
+    int rc, salen, sock;
+    // int val, len;
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
     struct sockaddr *sa = NULL;
@@ -229,8 +230,8 @@ relay_url_init(relay_instance *instance)
     }
 
 
-    val = TRUE;
-    len = sizeof(val);
+    // val = TRUE;
+    // len = sizeof(val);
 
     sock = socket(instance->relay_af, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {

@@ -1137,7 +1137,7 @@ relay_packet_enq(relay_instance *instance, packet *pkt)
 	struct timeval tv;
 
 	timerclear(&tv);
-	tv.tv_usec = AMT_PACKET_Q_USEC;
+	tv.tv_usec = usec;
 	evtimer_set(&instance->relay_pkt_timer, relay_packet_deq, instance);
 	rc = evtimer_add(&instance->relay_pkt_timer, &tv);
 	if (rc < 0) {
@@ -1267,12 +1267,13 @@ relay_message_read (relay_instance *instance, int fd)
 						INET_HOST_LEN);
 		}
 #else
+        (void)dl_addr;
   		if (cmsgptr->cmsg_level == SOL_IP && cmsgptr->cmsg_type == IP_PKTINFO){
-			struct in_addr s_addr = 
-					((struct in_pktinfo *)CMSG_DATA(cmsgptr))->ipi_spec_dst;
+            struct in_pktinfo *pktinfo =
+                (struct in_pktinfo*)CMSG_DATA(cmsgptr);
+			struct in_addr s_addr = pktinfo->ipi_spec_dst;
 		    pkt->pkt_dst = prefix_build(AF_INET, &s_addr, INET_HOST_LEN);
-	 		pkt->pkt_ifindex = 
-					((struct in_pktinfo *)CMSG_DATA(cmsgptr))->ipi_ifindex;
+	 		pkt->pkt_ifindex = pktinfo->ipi_ifindex;
 		}
 #endif		
 		ctl_left -= cmsgptr->cmsg_len;

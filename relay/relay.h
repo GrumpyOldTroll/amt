@@ -34,6 +34,11 @@
  * $Id: relay.h,v 1.1.1.8 2007/05/09 20:42:13 sachin Exp $
  */
 
+#ifndef AMT_RELAY_H_
+#define AMT_RELAY_H_
+
+#include <stdint.h>
+
 #define	AMT_PACKET_Q_USEC	50
 #define	NAMELEN			128
 #define	CTLLEN			128
@@ -159,7 +164,7 @@ typedef struct _sgnode {
 static inline sgnode *
 pat2sg (patext *ext)
 {
-    return((sgnode *)((int) ext - offsetof(sgnode, sg_node)));
+    return((sgnode *)((intptr_t) ext - offsetof(sgnode, sg_node)));
 }
 
 /*
@@ -183,7 +188,7 @@ typedef struct _gw_t {
 static inline gw_t *
 pat2gw (patext *ext)
 {
-    return((gw_t *)((int) ext - offsetof(gw_t, gw_node)));
+    return((gw_t *)((intptr_t) ext - offsetof(gw_t, gw_node)));
 }
 
 /*
@@ -238,3 +243,5 @@ void relay_rif_free(recv_if *);
 int relay_pcap_create(relay_instance *);
 int relay_pcap_destroy(relay_instance *);
 void relay_show_streams(relay_instance *, struct evbuffer *);
+
+#endif  // AMT_RELAY_H_
