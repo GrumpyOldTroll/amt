@@ -31,19 +31,23 @@ These notices must be retained in any copies of any part of this
 documentation and/or software.
  */
 
+#ifndef AMT_LIBMD5_MD5_H
+#define AMT_LIBMD5_MD5_H
+
 #if !defined(UINT4)
 #include "global.h"
-#endif	/* !defined(UINT4) */
+#endif /* !defined(UINT4) */
 
 /* MD5 context. */
-typedef struct {
-  UINT4 state[4];                                   /* state (ABCD) */
-  UINT4 count[2];        /* number of bits, modulo 2^64 (lsb first) */
-  unsigned char buffer[64];                         /* input buffer */
+typedef struct
+{
+    UINT4 state[4];           /* state (ABCD) */
+    UINT4 count[2];           /* number of bits, modulo 2^64 (lsb first) */
+    unsigned char buffer[64]; /* input buffer */
 } MD5_CTX;
 
-void MD5Init PROTO_LIST ((MD5_CTX *));
-void MD5Update PROTO_LIST
-  ((MD5_CTX *, unsigned char *, unsigned int));
-void MD5Final PROTO_LIST ((unsigned char [16], MD5_CTX *));
+void MD5Init PROTO_LIST((MD5_CTX*));
+void MD5Update PROTO_LIST((MD5_CTX*, unsigned char*, unsigned int));
+void MD5Final PROTO_LIST((unsigned char[16], MD5_CTX*));
 
+#endif  // AMT_LIBMD5_MD5_H

@@ -4,4 +4,9 @@
  * INET Checksum from ping.c
  */
 
-u_short in_cksum(u_short *, int);
+#ifndef AMT_LIBSUM_IN_CKSUM_H
+#define AMT_LIBSUM_IN_CKSUM_H
+
+u_short in_cksum(u_short*, int);
+
+#endif  // AMT_LIBSUM_IN_CKSUM_H

@@ -31,6 +31,9 @@ Funding for this work was provided by Juniper Networks, Inc.
 More information about Juniper Networks, Inc. can be found at
 http://www.juniper.net.
 
+Formatting applied with:
+clang-format -style="{BasedOnStyle: mozilla, ColumnLimit: 76, IndentWidth: 4, BinPackParameters: false, AlignAfterOpenBracket: DontAlign, ContinuationIndentWidth: 6}"
+
 Currently open issues:
 
 1. Deal with this error correctly when the relay shuts down

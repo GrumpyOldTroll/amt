@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -34,6 +34,15 @@
  * $Id: tree.h,v 1.1.1.8 2007/05/09 20:42:14 sachin Exp $
  */
 
-void membership_tree_refresh(relay_instance *, membership_type mt, packet *,
-			     prefix_t *, prefix_t *, prefix_t *);
-void relay_forward(packet *);
+#ifndef AMT_RELAY_TREE_H
+#define AMT_RELAY_TREE_H
+
+void membership_tree_refresh(relay_instance*,
+      membership_type mt,
+      packet*,
+      prefix_t*,
+      prefix_t*,
+      prefix_t*);
+void relay_forward(packet*);
+
+#endif  // AMT_RELAY_TREE_H

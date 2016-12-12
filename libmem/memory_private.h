@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -38,16 +38,25 @@
  * allocated and free'ed and find memory leaks by data structure.
  */
 
-#define	TRUE		1
-#define	FALSE		0
-#define	MAX_MEM_NAME	128
+#ifndef AMT_LIBMEM_MEMORY_PRIVATE_H
+#define AMT_LIBMEM_MEMORY_PRIVATE_H
 
-typedef struct mem_bits {
-    TAILQ_ENTRY(mem_bits) m_next;	/* list */
-    u_int32_t	m_size;			/* size of memory type */
-    u_int32_t	m_alloced;		/* number of allocs */
-    u_int32_t	m_freed;		/* number of freed */
-    char	m_name[MAX_MEM_NAME];	/* memory type description */
+#include <sys/types.h>
+#include <sys/queue.h>
+
+#define TRUE 1
+#define FALSE 0
+#define MAX_MEM_NAME 128
+
+typedef struct mem_bits
+{
+    TAILQ_ENTRY(mem_bits) m_next; /* list */
+    u_int32_t m_size;             /* size of memory type */
+    u_int32_t m_alloced;          /* number of allocs */
+    u_int32_t m_freed;            /* number of freed */
+    char m_name[MAX_MEM_NAME];    /* memory type description */
 } mem_bits_t;
 
 TAILQ_HEAD(mem_list, mem_bits);
+
+#endif  // AMT_LIBMEM_MEMORY_PRIVATE_H

@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -30,28 +30,29 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-static const char __attribute__((unused)) id[] = "@(#) $Id: memory.c,v 1.1.1.8 2007/05/09 20:41:35 sachin Exp $";
+static const char __attribute__((unused)) id[] =
+      "@(#) $Id: memory.c,v 1.1.1.8 2007/05/09 20:41:35 sachin Exp $";
 
-#include <sys/types.h>
-#include <sys/queue.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include "memory_private.h"
 #include "memory.h"
+#include "memory_private.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/queue.h>
+#include <sys/types.h>
 
 static struct mem_list mem_head;
 
 mem_handle
-mem_type_init(int size, const char *name)
+mem_type_init(int size, const char* name)
 {
     static int inited = FALSE;
-    mem_bits_t *mb;
+    mem_bits_t* mb;
 
     if (!inited) {
-	TAILQ_INIT(&mem_head);
-	inited = TRUE;
+        TAILQ_INIT(&mem_head);
+        inited = TRUE;
     }
     mb = calloc(1, sizeof(mem_bits_t));
     assert(mb);
@@ -64,38 +65,39 @@ mem_type_init(int size, const char *name)
     return mb;
 }
 
-void *
+void*
 mem_type_alloc(mem_handle handle)
 {
-    mem_bits_t *mb;
+    mem_bits_t* mb;
 
     mb = handle;
 
-    assert (mb->m_size > 0);
-	
+    assert(mb->m_size > 0);
+
     mb->m_alloced++;
     return calloc(1, mb->m_size);
 }
 
 void
-mem_type_free(mem_handle handle, void *mem)
+mem_type_free(mem_handle handle, void* mem)
 {
-    mem_bits_t *mb;
+    mem_bits_t* mb;
 
-    mb = (mem_bits_t *) handle;
+    mb = (mem_bits_t*)handle;
 
-    assert (mb->m_size > 0);
-	
+    assert(mb->m_size > 0);
+
     mb->m_freed++;
     free(mem);
 }
 
 void
-mem_type_show(mem_print print, void *arg)
+mem_type_show(mem_print print, void* arg)
 {
-    mem_bits_t *mb;
+    mem_bits_t* mb;
 
-    TAILQ_FOREACH(mb, &mem_head, m_next) {
-	(*print)(arg, mb->m_size, mb->m_alloced, mb->m_freed, mb->m_name);
+    TAILQ_FOREACH(mb, &mem_head, m_next)
+    {
+        (*print)(arg, mb->m_size, mb->m_alloced, mb->m_freed, mb->m_name);
     }
 }

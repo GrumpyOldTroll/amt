@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -38,11 +38,17 @@
  * allocated and free'ed and find memory leaks by data structure.
  */
 
-typedef void *	mem_handle;	/* pointer to opaque handle */
-typedef void (mem_print)(void *, u_int32_t, u_int32_t, u_int32_t, char *);
+#ifndef AMT_LIBMEM_MEMORY_H
+#define AMT_LIBMEM_MEMORY_H
 
-mem_handle mem_type_init(int, const char *name);
-void *mem_type_alloc(mem_handle);
-void mem_type_free(mem_handle, void *);
-void mem_type_show(mem_print, void *);
+#include <sys/types.h>
 
+typedef void* mem_handle; /* pointer to opaque handle */
+typedef void(mem_print)(void*, u_int32_t, u_int32_t, u_int32_t, char*);
+
+mem_handle mem_type_init(int, const char* name);
+void* mem_type_alloc(mem_handle);
+void mem_type_free(mem_handle, void*);
+void mem_type_show(mem_print, void*);
+
+#endif  // AMT_LIBMEM_MEMORY_H

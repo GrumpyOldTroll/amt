@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -30,60 +30,61 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-static const char __attribute__((unused)) id[] = "@(#) $Id: test-patricia.c,v 1.1.1.8 2007/05/09 20:42:30 sachin Exp $";
+static const char __attribute__((unused)) id[] =
+      "@(#) $Id: test-patricia.c,v 1.1.1.8 2007/05/09 20:42:30 sachin Exp "
+      "$";
 
-#include <sys/types.h>
-#include <stdio.h>
 #include <stdarg.h>
-#include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
 
 #include "pat.h"
 
-typedef struct _mynode {
-    u_int	ref_cnt;	
-    patext	extkey;
+typedef struct _mynode
+{
+    u_int ref_cnt;
+    patext extkey;
 } mynode;
 
 /*
  * Map from external key to mynode
  */
-static inline mynode *
-pat2my (patext *ext)
+static inline mynode*
+pat2my(patext* ext)
 {
-    return((mynode *)((intptr_t) ext - offsetof(mynode, extkey)));
+    return ((mynode*)((intptr_t)ext - offsetof(mynode, extkey)));
 }
 
 void
-my_print(patext *ext)
+my_print(patext* ext)
 {
-    mynode *n = pat2my(ext);
-    u_char *k = pat_key_get(ext);
+    mynode* n = pat2my(ext);
+    u_char* k = pat_key_get(ext);
     int bytes, size;
 
     size = pat_keysize_get(ext);
     bytes = size / NBBY;
     fprintf(stderr, "ref cnt: %u, keysize %d\n", n->ref_cnt, size);
     while (bytes--) {
-	fprintf(stderr, "0x%0x ", *k++);
+        fprintf(stderr, "0x%0x ", *k++);
     }
     fprintf(stderr, "\n");
 }
 
-int
-main(argc, argv)
-int argc;
-char *argv[];
+int main(argc, argv) int argc;
+char* argv[];
 {
     pat_handle root = NULL;
-    patext *ext;
+    patext* ext;
     mynode *n, *n2, *n3, *new;
     u_char idxs[5] = { 0x10, 0x22, 0x87, 0x94, 0x33 };
     u_char idxs2[4] = { 0x10, 0x22, 0x85, 0x95 };
     u_char idxs3[6] = { 0x10, 0x22, 0x85, 0x95, 0x33, 0x33 };
 
     fprintf(stderr, "adding keys\n");
-    n = (mynode *) calloc(3, sizeof(mynode));
+    n = (mynode*)calloc(3, sizeof(mynode));
 
     n->ref_cnt = 1;
     pat_key_set(&n->extkey, idxs);
@@ -91,20 +92,19 @@ char *argv[];
 
     pat_add(&root, &n->extkey);
 
-    n2 = n+1;
+    n2 = n + 1;
     n2->ref_cnt = 1;
     pat_key_set(&n2->extkey, idxs2);
     pat_keysize_set(&n2->extkey, sizeof(idxs2) * NBBY);
 
     pat_add(&root, &n2->extkey);
 
-    n3 = n2+1;
+    n3 = n2 + 1;
     n3->ref_cnt = 1;
     pat_key_set(&n3->extkey, idxs3);
     pat_keysize_set(&n3->extkey, sizeof(idxs3) * NBBY);
 
     pat_add(&root, &n3->extkey);
-
 
     fprintf(stderr, "\nWalking tree with pat_walk\n");
     pat_walk(&root, my_print);
@@ -113,18 +113,17 @@ char *argv[];
 
     fprintf(stderr, "\nLooking up idxs\n");
     if (new) {
-	my_print(&new->extkey);
+        my_print(&new->extkey);
     } else {
-	fprintf(stderr, "Can't find idxs\n");
+        fprintf(stderr, "Can't find idxs\n");
     }
 
     fprintf(stderr, "\nWalking tree with getnext\n");
 
     ext = pat_getnext(&root, NULL, 0);
     while (ext) {
-	my_print(ext);
-	ext = pat_getnext(&root, pat_key_get(ext), pat_keysize_get(ext));
+        my_print(ext);
+        ext = pat_getnext(&root, pat_key_get(ext), pat_keysize_get(ext));
     }
     return 0;
 }
-

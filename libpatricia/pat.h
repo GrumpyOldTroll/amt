@@ -1,9 +1,9 @@
 /*
  * COPYRIGHT AND LICENSE
- * 
+ *
  * Copyright (c) 2004-2005, Juniper Networks, Inc.
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
@@ -70,55 +70,63 @@
  *  u_int   pat_keysize_get(patext *keynode)
  */
 
+#ifndef AMT_LIBPATRICIA_PAT_H
+#define AMT_LIBPATRICIA_PAT_H
+
+#include <sys/types.h>
+
 #ifndef offsetof
-#define offsetof(type, member) ((size_t) &((type *)0)->member)
+#define offsetof(type, member) ((size_t) & ((type*)0)->member)
 #endif
 
-#define BIT_TEST(f, b)  ((f) & (b))
+#define BIT_TEST(f, b) ((f) & (b))
 #ifndef MIN
-#define MIN(a, b)       ((a) < (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
 #ifndef NBBY
-#define NBBY		8		/* number of bits in a byte */
+#define NBBY 8 /* number of bits in a byte */
 #endif
 
 typedef struct _patnode patnode;
-typedef patnode * pat_handle;
+typedef patnode* pat_handle;
 
-typedef struct _patext {
-    patnode	*patnodeptr;
-    u_int	keysize;
-    u_char	*key;
+typedef struct _patext
+{
+    patnode* patnodeptr;
+    u_int keysize;
+    u_char* key;
 } patext;
 
-static inline u_char *
-pat_key_get(patext *keynode)
+static inline u_char*
+pat_key_get(patext* keynode)
 {
     return keynode->key;
 }
 
 static inline void
-pat_key_set(patext *keynode, u_char *key)
+pat_key_set(patext* keynode, u_char* key)
 {
     keynode->key = key;
 }
 
 static inline u_int
-pat_keysize_get(patext *keynode)
+pat_keysize_get(patext* keynode)
 {
     return keynode->keysize;
 }
 
 static inline void
-pat_keysize_set(patext *keynode, u_int keysize)
+pat_keysize_set(patext* keynode, u_int keysize)
 {
     keynode->keysize = keysize;
 }
 
-void	pat_add(pat_handle *, patext *);
-void	pat_delete(pat_handle *, patext *);
-patext *pat_get(pat_handle *, u_int, u_char *);
-patext *pat_getnext(pat_handle *, u_char *, u_int);
-void	pat_walk(pat_handle *, void (*func)(patext *));
-int	pat_empty(pat_handle *);
+void pat_add(pat_handle*, patext*);
+void pat_delete(pat_handle*, patext*);
+patext* pat_get(pat_handle*, u_int, u_char*);
+patext* pat_getnext(pat_handle*, u_char*, u_int);
+void pat_walk(pat_handle*, void (*func)(patext*));
+int pat_empty(pat_handle*);
+
+#endif  // AMT_LIBPATRICIA_PAT_H
