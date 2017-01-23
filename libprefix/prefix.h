@@ -90,7 +90,9 @@ const char* prefix2str(prefix_t*, char*, int);
 static inline void
 prefix2sin6(prefix_t* pfx, struct sockaddr_in6* sin6)
 {
-    /* XXX */
+    bzero(sin6, sizeof(struct sockaddr_in6));
+    sin6->sin6_family = pfx->family;
+    sin6->sin6_addr = pfx->addr.sin6;
 }
 
 static inline void
@@ -131,6 +133,7 @@ static inline prefix_t*
 sock2prefix(int family, struct sockaddr* sa)
 {
     struct sockaddr_in* sin;
+    struct sockaddr_in6* sin6;
     prefix_t* pfx = NULL;
 
     switch (family) {
@@ -141,7 +144,9 @@ sock2prefix(int family, struct sockaddr* sa)
             break;
 
         case AF_INET6:
-            /* XXX */
+            sin6 = (struct sockaddr_in6*)sa;
+            pfx = prefix_build(family, sin6->sin6_addr.s6_addr,
+                  sizeof(struct in6_addr) * NBBY);
             break;
 
         default:

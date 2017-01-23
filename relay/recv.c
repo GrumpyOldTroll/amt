@@ -31,7 +31,7 @@
  */
 
 static const char __attribute__((unused)) id[] =
-      "@(#) $Id: recv.c,v 1.1.1.8 2007/05/09 20:42:14 sachin Exp $";
+      "@(#) $Id: //sandbox/pyang/amt/relay/recv.c#12 $";
 
 #include <sys/errno.h>
 #include <sys/param.h>
@@ -54,15 +54,15 @@ static const char __attribute__((unused)) id[] =
 #ifdef BSD
 #include <net/if_dl.h>
 #endif /* BSD */
+#define __USE_GNU 1
+#include <arpa/inet.h>
 #include <linux/igmp.h>
-#include <netinet/igmp.h>
+#include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <netinet/udp.h>
-
-#include <arpa/inet.h>
-#include <netinet/if_ether.h>
 #include <pcap.h>
 
 #include <event.h>
@@ -73,6 +73,7 @@ static const char __attribute__((unused)) id[] =
 #include "hmac.h"
 #include "in_cksum.h"
 #include "memory.h"
+#include "mld.h"
 #include "pat.h"
 #include "prefix.h"
 #include "relay.h"
@@ -208,7 +209,7 @@ parse_igmp_record(relay_instance* instance,
     struct igmpv3_grec* igmp_grec;
     mcast_source_t* gsrc;
     u_int16_t cnt, ngrec, nsrcs;
-    membership_type mt;
+    membership_type mt = 0;
 
     ngrec = ntohs(igmp->ngrec);
     igmp_grec = &igmp->grec[0];
@@ -301,7 +302,7 @@ igmp_decode(relay_instance* instance,
 {
     int hlen, len, pktlen;
     struct ip* ip;
-    struct igmp* igmp;
+    struct igmphdr* igmp;
     group_record_t* tmp;
     u_int8_t* cp;
     u_int32_t mc_addr;
@@ -321,7 +322,7 @@ igmp_decode(relay_instance* instance,
 
     hlen = ip->ip_hl << 2;
 
-    igmp = (struct igmp*)((u_int8_t*)ip + hlen);
+    igmp = (struct igmphdr*)((u_int8_t*)ip + hlen);
     len = ntohs(ip->ip_len);
 
     if (len != pktlen) {
@@ -348,15 +349,15 @@ igmp_decode(relay_instance* instance,
      */
     *from_ptr = prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
 
-    switch (igmp->igmp_type) {
-        case IGMP_V1_MEMBERSHIP_REPORT:
-        case IGMP_V2_MEMBERSHIP_REPORT:
+    switch (igmp->type) {
+        case IGMP_HOST_MEMBERSHIP_REPORT:
+        case IGMPV2_HOST_MEMBERSHIP_REPORT:
             if ((tmp = calloc(1, sizeof(group_record_t))) == NULL) {
                 return FALSE;
             }
 
             /* Multicast group address */
-            mc_addr = igmp->igmp_group.s_addr;
+            mc_addr = igmp->group;
             if (IN_MULTICAST(ntohl(mc_addr))) {
                 tmp->group = prefix_build(AF_INET, &mc_addr, INET_HOST_LEN);
             } else {
@@ -367,13 +368,13 @@ igmp_decode(relay_instance* instance,
             tmp->mt = MEMBERSHIP_REPORT;
             TAILQ_INSERT_TAIL(grec_head, tmp, rec_next);
             break;
-        case IGMP_V2_LEAVE_GROUP:
+        case IGMP_HOST_LEAVE_MESSAGE:
             if ((tmp = calloc(1, sizeof(group_record_t))) == NULL) {
                 return FALSE;
             }
 
             /* Multicast group address */
-            mc_addr = igmp->igmp_group.s_addr;
+            mc_addr = igmp->group;
             if (IN_MULTICAST(ntohl(mc_addr))) {
                 tmp->group = prefix_build(AF_INET, &mc_addr, INET_HOST_LEN);
             } else {
@@ -399,6 +400,178 @@ igmp_decode(relay_instance* instance,
     return TRUE;
 }
 
+static int
+parse_mld_record(relay_instance* instance,
+      struct mld2_report* mld_report_hdr,
+      group_record_list_t* grec_head)
+{
+    struct mld2_grec* grec;
+    u_int16_t cnt, ngrecs, nsrcs;
+    group_record_t* tmp;
+    membership_type mt = 0;
+    struct in6_addr src_addr;
+    mcast_source_t* gsrc;
+
+    ngrecs = ntohs(mld_report_hdr->mld2r_ngrec);
+    grec = mld_report_hdr->mld2r_grec;
+    while (ngrecs--) {
+        nsrcs = ntohs(grec->grec_nsrcs);
+        switch (grec->grec_type) {
+            case MLD2_CHANGE_TO_INCLUDE:
+            case MLD2_MODE_IS_INCLUDE: {
+                if (nsrcs > 0)
+                    mt = MEMBERSHIP_REPORT;
+                else
+                    mt = MEMBERSHIP_LEAVE;
+                break;
+            }
+            case MLD2_MODE_IS_EXCLUDE:
+            case MLD2_CHANGE_TO_EXCLUDE: {
+                if (nsrcs > 0)
+                    mt = MEMBERSHIP_LEAVE;
+                else
+                    mt = MEMBERSHIP_REPORT;
+                break;
+            }
+            case MLD2_ALLOW_NEW_SOURCES:
+                mt = MEMBERSHIP_REPORT;
+                break;
+            case MLD2_BLOCK_OLD_SOURCES:
+                mt = MEMBERSHIP_LEAVE;
+                break;
+        }
+
+        /* create a new group record */
+        if ((tmp = calloc(1, sizeof(group_record_t))) == NULL) {
+            free_grecord_list(grec_head);
+            return FALSE;
+        }
+
+        /* Set the record type */
+        tmp->mt = mt;
+        tmp->nsrcs = nsrcs;
+#define IN6_MULTICAST(addr) (((addr) & (0xff)) == 0xff)
+        if (IN6_MULTICAST(grec->grec_mca.s6_addr[0])) {
+            tmp->group = prefix_build(
+                  AF_INET6, grec->grec_mca.s6_addr, INET6_HOST_LEN);
+        } else {
+            instance->stats.mld_group_invalid++;
+            free(tmp);
+            continue;
+        }
+        TAILQ_INIT(&tmp->src_head);
+        for (cnt = 0; cnt < nsrcs; cnt++) {
+            src_addr = grec->grec_src[cnt];
+            if ((gsrc = calloc(1, sizeof(mcast_source_t))) == NULL) {
+                free_grecord_list(grec_head);
+                free(tmp);
+                return FALSE;
+            }
+            gsrc->source =
+                  prefix_build(AF_INET6, src_addr.s6_addr, INET6_HOST_LEN);
+            /* Add source to the list */
+            TAILQ_INSERT_TAIL(&tmp->src_head, gsrc, src_next);
+        }
+
+        /* Add the record to the list */
+        TAILQ_INSERT_TAIL(grec_head, tmp, rec_next);
+
+        /* Go the the next record */
+        grec = (struct mld2_grec*)((u_int8_t*)grec + sizeof(*grec) +
+                                   (grec->grec_auxwords << 2) +
+                                   (nsrcs << 4));
+    }
+
+    return TRUE;
+}
+
+/* Return TRUE on success */
+static membership_type
+mld_decode(relay_instance* instance,
+      packet* pkt,
+      group_record_list_t* grec_head,
+      prefix_t** from_ptr)
+{
+    u_int8_t* cp;
+    int pktlen, iphlen;
+    struct ip6_hdr* ip;
+    struct ip6_ext* ext_hdr;
+    u_int8_t hdr_type;
+    struct mld_msg* mld_hdr;
+    struct mld2_report* mld_report_hdr;
+
+    pktlen = pkt->pkt_len;
+
+    /* skip AMT headers */
+    cp = pkt->pkt_buffer;
+    cp++;
+    pktlen--; /* Skip type */
+    cp++;
+    pktlen--; /* Skip reserved */
+    cp += RESPONSE_MAC_LEN;
+    pktlen -= RESPONSE_MAC_LEN; /* Skip MAC */
+    cp += sizeof(u_int32_t);
+    pktlen -= sizeof(u_int32_t); /* Skip nonce */
+
+    /* Process IPv6 header */
+    ip = (struct ip6_hdr*)cp;
+    iphlen = sizeof(*ip);
+    pktlen -= sizeof(*ip);
+    hdr_type = ip->ip6_nxt;
+    cp += sizeof(*ip);
+    while (hdr_type != IPPROTO_ICMPV6 && hdr_type != IPPROTO_NONE) {
+        ext_hdr = (struct ip6_ext*)cp;
+        hdr_type = ext_hdr->ip6e_nxt;
+        iphlen += ((ext_hdr->ip6e_len + 1) << 3);
+        cp += ((ext_hdr->ip6e_len + 1) << 3);
+    }
+
+    if (hdr_type == IPPROTO_NONE)
+        return MEMBERSHIP_ERROR;
+
+    if (ntohs(ip->ip6_plen) != pktlen) {
+        instance->stats.mld_len_bad++;
+        return MEMBERSHIP_ERROR;
+    }
+
+    mld_hdr = (struct mld_msg*)cp;
+    pktlen -= iphlen;
+    pktlen += sizeof(*ip); /* compensation */
+
+#define MLD_MIMLEN (sizeof(struct mld2_report) + sizeof(struct mld2_grec))
+    if (pktlen < MLD_MIMLEN) {
+        instance->stats.mld_short_bad++;
+        return MEMBERSHIP_ERROR;
+    }
+
+    if (0 /*to-do: implement ICMP checksum */) {
+        instance->stats.mld_checksum_bad++;
+        return MEMBERSHIP_ERROR;
+    }
+
+    /*
+ * Save the inner IP header source address
+ */
+    *from_ptr = prefix_build(AF_INET6, ip->ip6_src.s6_addr, INET6_HOST_LEN);
+
+    /* Process the MLD message */
+    switch (mld_hdr->mld_type) {
+        case ICMPV6_MLD2_REPORT: {
+            mld_report_hdr = (struct mld2_report*)mld_hdr;
+            if (parse_mld_record(instance, mld_report_hdr, grec_head) ==
+                  FALSE) {
+                return FALSE;
+            }
+            break;
+        }
+        default:
+            instance->stats.mld_packet_unsupported++;
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
 /*
  * return TRUE on success
  */
@@ -408,9 +581,13 @@ membership_pkt_decode(relay_instance* instance,
       group_record_list_t* grec_head,
       prefix_t** from_ptr)
 {
-    switch (instance->relay_af) {
+    switch (instance->tunnel_af) {
+        /* switch(instance->relay_af) { */
         case AF_INET:
             return igmp_decode(instance, pkt, grec_head, from_ptr);
+            break;
+        case AF_INET6:
+            return mld_decode(instance, pkt, grec_head, from_ptr);
             break;
         default:
             instance->stats.af_unsupported++;
@@ -523,9 +700,12 @@ relay_response_mac_verify(packet* pkt)
     relay_response_mac(pkt, nonce, digest);
 
     if (relay_debug(instance)) {
-        fprintf(stderr, "Received AMT Membership Change nonce %u "
-                        "received mac %02x%02x%02x%02x%02x%02x\n",
-              nonce, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        fprintf(stderr, "Received AMT Membership Change nonce %u received "
+                        "mac %02x%02x%02x%02x%02x%02x true mac "
+                        "%02x%02x%02x%02x%02x%02x\n",
+              nonce, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+              digest[0], digest[1], digest[2], digest[3], digest[4],
+              digest[5]);
     }
     return memcmp(mac, digest, RESPONSE_MAC_LEN);
 }
@@ -571,7 +751,11 @@ relay_select_src_addr(relay_instance* instance,
     }
 
     len = prefix2sock(dst, sa);
-    sin.sin_port = dport;
+    if (dst->family == AF_INET)
+        sin.sin_port = dport;
+    else
+        sin6.sin6_port = dport;
+
     rc = connect(s, sa, len);
     if (rc < 0) {
         /*
@@ -619,6 +803,7 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
 {
     int rc, srclen;
     struct sockaddr_in src;
+    struct sockaddr_in6 src6;
     struct sockaddr* src_sa = NULL;
     patext* pat;
     recv_if* rif;
@@ -642,10 +827,17 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
     pat_keysize_set(&rif->rif_node, prefix_keylen(&rif->rif_pfx));
     pat_add(&instance->rif_root, &rif->rif_node);
 
-    src_sa = (struct sockaddr*)&src;
-    srclen = sizeof(src);
-    prefix2sock(src_pfx, src_sa);
-    src.sin_port = htons(AMT_PORT);
+    if (instance->relay_af == AF_INET) {
+        src_sa = (struct sockaddr*)&src;
+        srclen = sizeof(src);
+        prefix2sin(src_pfx, &src);
+        src.sin_port = htons(instance->amt_port);
+    } else {
+        src_sa = (struct sockaddr*)&src6;
+        srclen = sizeof(src6);
+        prefix2sin6(src_pfx, &src6);
+        src6.sin6_port = htons(instance->amt_port);
+    }
 
     rif->rif_sock =
           relay_socket_shared_init(instance->relay_af, src_sa, srclen);
@@ -677,6 +869,7 @@ relay_send_advertisement(packet* pkt, u_int32_t nonce, prefix_t* from)
     u_int8_t* cp;
     relay_instance* instance;
     struct sockaddr_in dst;
+    struct sockaddr_in6 dst6;
     struct sockaddr* dst_sa = NULL;
 
     instance = pkt->pkt_instance;
@@ -702,12 +895,18 @@ relay_send_advertisement(packet* pkt, u_int32_t nonce, prefix_t* from)
              */
             dst_sa = (struct sockaddr*)&dst;
             dstlen = sizeof(dst);
-            prefix2sock(pkt->pkt_src, dst_sa);
+            prefix2sin(pkt->pkt_src, &dst);
             dst.sin_port = pkt->pkt_sport;
             break;
 
         case AF_INET6:
-            /* XXX */
+            bcopy(&from->addr.sin6, cp, sizeof(struct in6_addr));
+            cp += sizeof(struct in6_addr);
+
+            dst_sa = (struct sockaddr*)&dst6;
+            dstlen = sizeof(dst6);
+            prefix2sin6(pkt->pkt_src, &dst6);
+            dst6.sin6_port = pkt->pkt_sport;
             break;
 
         default:
@@ -774,14 +973,15 @@ static int
 add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
 {
     char str[MAX_ADDR_STRLEN];
-    fprintf(stderr, "select source address for %s %s\n",
-          prefix2str(pkt->pkt_dst, str, sizeof(str)),
-          inet_ntoa(pkt->pkt_dst->addr.sin));
+    fprintf(stderr, "select source address for %s\n",
+          prefix2str(pkt->pkt_dst, str, sizeof(str)));
     int len = -1;
-    switch (pkt->pkt_src->family) {
+    switch (instance->tunnel_af) {
+        /* switch (pkt->pkt_src->family) { */
         case AF_INET: {
             struct ip* iph;
             struct igmpv3_query* igmpq;
+            struct sockaddr_in* src_addr;
             iph = (struct ip*)cp;
             /* Fill IP header */
             iph->ip_hl = 5;
@@ -794,8 +994,8 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             iph->ip_ttl = 1;
             iph->ip_p = 2; /* IGMP */
             iph->ip_sum = 0;
-            bcopy(&pkt->pkt_dst->addr.sin, &iph->ip_src,
-                  sizeof(struct in_addr));
+            src_addr = (struct sockaddr_in*)&instance->tunnel_addr;
+            iph->ip_src = src_addr->sin_addr;
             iph->ip_dst.s_addr = inet_addr("224.0.0.1");
 
             /* IGMPv3 membership query */
@@ -807,7 +1007,7 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             igmpq->qrv = 0;
             igmpq->suppress = 1;
             igmpq->resv = 0;
-            igmpq->qqic = 125;
+            igmpq->qqic = QQIC;
             igmpq->nsrcs = 0;
             igmpq->srcs[0] = 0;
             igmpq->csum = csum((unsigned short*)igmpq,
@@ -817,8 +1017,62 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             len = sizeof(struct ip) + sizeof(struct igmpv3_query);
             break;
         }
-        case AF_INET6:
+        case AF_INET6: {
+            struct ip6_hdr* iph;
+            struct mld2_query* mld_query_hdr;
+            u_int8_t* chdr;
+            struct ip6_pseudo* pseudo_hdr;
+            struct sockaddr_in6* src_addr;
+            u_int8_t r_alert[8] = { IPPROTO_ICMPV6, 0, IP6OPT_ROUTER_ALERT,
+                2, 0, 0, IP6OPT_PADN, 0 };
+
+            chdr = (u_int8_t*)malloc(
+                  sizeof(struct ip6_pseudo) + sizeof(*mld_query_hdr));
+            if (chdr == NULL)
+                return 0;
+
+            iph = (struct ip6_hdr*)cp;
+            bzero(cp, sizeof(*iph));
+            iph->ip6_vfc = (6 << 4);
+#define NEXTHDR_HOP 0
+            iph->ip6_nxt = NEXTHDR_HOP;
+            iph->ip6_hlim = 1;
+            src_addr = (struct sockaddr_in6*)&instance->tunnel_addr;
+            iph->ip6_src = src_addr->sin6_addr;
+            inet_pton(AF_INET6, "ff02::1", &iph->ip6_dst);
+            bcopy(r_alert, cp + sizeof(*iph), sizeof(r_alert));
+
+            cp += (sizeof(*iph) + sizeof(r_alert));
+            mld_query_hdr = (struct mld2_query*)cp;
+            mld_query_hdr->mld2q_type = ICMPV6_MGM_QUERY;
+            mld_query_hdr->mld2q_code = 0;
+            mld_query_hdr->mld2q_cksum = 0;
+            mld_query_hdr->mld2q_mrc = htons(100);
+            mld_query_hdr->mld2q_resv1 = 0;
+            bzero(&mld_query_hdr->mld2q_mca, sizeof(struct in6_addr));
+            mld_query_hdr->mld2q_qrv = 0;
+            mld_query_hdr->mld2q_suppress = 1;
+            mld_query_hdr->mld2q_qqic = QQIC;
+            mld_query_hdr->mld2q_nsrcs = 0;
+            mld_query_hdr->mld2q_resv2 = 0;
+            cp += sizeof(*mld_query_hdr);
+
+            iph->ip6_plen = htons(cp - (u_int8_t*)iph - sizeof(*iph));
+
+            pseudo_hdr = (struct ip6_pseudo*)chdr;
+            bcopy(&iph->ip6_src, &pseudo_hdr->src, sizeof(struct in6_addr));
+            bcopy(&iph->ip6_dst, &pseudo_hdr->dst, sizeof(struct in6_addr));
+            pseudo_hdr->uplen = htonl(cp - (u_int8_t*)iph - sizeof(*iph));
+            pseudo_hdr->nxthdr = htonl(IPPROTO_ICMPV6);
+            bcopy(mld_query_hdr, chdr + sizeof(*pseudo_hdr),
+                  sizeof(*mld_query_hdr));
+            mld_query_hdr->mld2q_cksum = csum((unsigned short*)chdr,
+                  (sizeof(*pseudo_hdr) + sizeof(*mld_query_hdr)) >> 1);
+            free(chdr);
+
+            len = cp - (u_int8_t*)iph;
             break;
+        }
     }
 
     return len;
@@ -831,6 +1085,7 @@ relay_send_membership_query(packet* pkt, u_int32_t nonce, u_int8_t* digest)
     u_int8_t* cp;
     relay_instance* instance;
     struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
 
     instance = pkt->pkt_instance;
 
@@ -853,15 +1108,23 @@ relay_send_membership_query(packet* pkt, u_int32_t nonce, u_int8_t* digest)
 
     len += querylen;
 
-    prefix2sock(pkt->pkt_src, (struct sockaddr*)&sin);
-    sin.sin_port = pkt->pkt_sport;
+    if (pkt->pkt_af == AF_INET) {
+        prefix2sin(pkt->pkt_src, &sin);
+        sin.sin_port = pkt->pkt_sport;
+    } else {
+        prefix2sin6(pkt->pkt_src, &sin6);
+        sin6.sin6_port = pkt->pkt_sport;
+    }
 
     tries = 3;
     while (tries--) {
         ssize_t rc;
-
-        rc = sendto(pkt->pkt_fd, instance->packet_buffer, len, MSG_DONTWAIT,
-              (struct sockaddr*)&sin, sizeof(sin));
+        if (pkt->pkt_af == AF_INET)
+            rc = sendto(pkt->pkt_fd, instance->packet_buffer, len,
+                  MSG_DONTWAIT, (struct sockaddr*)&sin, sizeof(sin));
+        else
+            rc = sendto(pkt->pkt_fd, instance->packet_buffer, len,
+                  MSG_DONTWAIT, (struct sockaddr*)&sin6, sizeof(sin6));
         if (rc < 0) {
             switch (errno) {
                 case EINTR:
@@ -891,6 +1154,7 @@ relay_packet_deq(int fd, short event, void* uap)
     relay_instance* instance = (relay_instance*)uap;
     packet_queue_pri queue;
     int finished = TRUE;
+    u_int32_t deq_pkt_cnt = 0;
 
     /*
      * Simple priority scheme
@@ -899,7 +1163,8 @@ relay_packet_deq(int fd, short event, void* uap)
     queue = HIGH;
 
     while ((queue < NUM_QUEUES)) {
-        if (!TAILQ_EMPTY(&instance->pkt_head[queue])) {
+        if (!TAILQ_EMPTY(&instance->pkt_head[queue]) &&
+              deq_pkt_cnt < instance->dequeue_count) {
             prefix_t *group, *source, *from;
             group_record_list_t grec_head;
             group_record_t* tmprec;
@@ -965,21 +1230,37 @@ relay_packet_deq(int fd, short event, void* uap)
                     break;
 
                 case AMT_REQUEST:
-                    if (relay_debug(instance)) {
-                        fprintf(stderr, "Received AMT Request, ");
-                    }
                     nonce = relay_gw_nonce_extract(pkt);
+                    if (relay_debug(instance)) {
+                        fprintf(stderr, "Received %s AMT Request len %d "
+                                        "from %s:%u to %s:%u nonce %u\n",
+                              (pkt->pkt_af == AF_INET) ? "INET" : "INET6",
+                              pkt->pkt_len,
+                              prefix2str(pkt->pkt_src, str, sizeof(str)),
+                              ntohs(pkt->pkt_sport),
+                              prefix2str(pkt->pkt_dst, str2, sizeof(str2)),
+                              ntohs(pkt->pkt_dport), nonce);
+                    }
                     if (nonce) {
                         u_int8_t digest[HMAC_LEN];
 
                         relay_response_mac(pkt, nonce, digest);
                         relay_send_membership_query(pkt, nonce, digest);
                         if (relay_debug(instance)) {
-                            fprintf(stderr,
-                                  "sent AMT Membership Query nonce "
-                                  "%u digest %02x%02x%02x%02x%02x%02x\n",
-                                  nonce, digest[0], digest[1], digest[2],
-                                  digest[3], digest[4], digest[5]);
+                            fprintf(stderr, "Sent %s AMT Membership Query "
+                                            "len %d from %s:%u to %s:%u "
+                                            "nonce %u MAC "
+                                            "%02x%02x%02x%02x%02x%02x\n",
+                                  (pkt->pkt_af == AF_INET) ? "INET"
+                                                           : "INET6",
+                                  pkt->pkt_len, prefix2str(pkt->pkt_dst,
+                                                      str2, sizeof(str2)),
+                                  ntohs(pkt->pkt_dport),
+                                  prefix2str(
+                                        pkt->pkt_src, str, sizeof(str)),
+                                  ntohs(pkt->pkt_sport), nonce, digest[0],
+                                  digest[1], digest[2], digest[3],
+                                  digest[4], digest[5]);
                         }
                     } else {
                         if (relay_debug(instance)) {
@@ -1010,6 +1291,9 @@ relay_packet_deq(int fd, short event, void* uap)
                     mt = membership_pkt_decode(
                           instance, pkt, &grec_head, &from);
                     if (mt == FALSE) {
+                        if (relay_debug(instance))
+                            fprintf(stderr,
+                                  "Failed to decode membership pkt\n");
                         break;
                     }
                     while (!TAILQ_EMPTY(&grec_head)) {
@@ -1047,22 +1331,41 @@ relay_packet_deq(int fd, short event, void* uap)
 
                 case AMT_MCAST_DATA:
                     if (relay_debug(instance)) {
-                        fprintf(stderr,
-                              "Received %s data packet len %d from %s",
-                              (pkt->pkt_af == AF_INET) ? "INET" : "INET6",
-                              pkt->pkt_len,
-                              prefix2str(pkt->pkt_src, str, sizeof(str)));
-                        if (pkt->pkt_sport) {
-                            fprintf(stderr, ":%u ", ntohs(pkt->pkt_sport));
-                        } else {
-                            fprintf(stderr, " ");
+                        static unsigned int data_pkts_recvd = 0;
+                        if (data_pkts_recvd % 10000 == 0) {
+                            fprintf(stderr, "Received %s data packet %u, "
+                                            "len %d from %s",
+                                  (pkt->pkt_af == AF_INET) ? "INET"
+                                                           : "INET6",
+                                  data_pkts_recvd, pkt->pkt_len,
+                                  prefix2str(
+                                        pkt->pkt_src, str, sizeof(str)));
+                            /*
+                            fprintf(stderr,
+                                    "Received %s data packet len %d from
+                            %s",
+                                    (pkt->pkt_af == AF_INET) ? "INET" :
+                            "INET6",
+                                    pkt->pkt_len,
+                                    prefix2str(pkt->pkt_src, str,
+                            sizeof(str)));
+                            */
+                            if (pkt->pkt_sport) {
+                                fprintf(stderr, ":%u ",
+                                      ntohs(pkt->pkt_sport));
+                            } else {
+                                fprintf(stderr, " ");
+                            }
+                            fprintf(stderr, "to %s",
+                                  prefix2str(
+                                        pkt->pkt_dst, str2, sizeof(str2)));
+                            if (pkt->pkt_dport) {
+                                fprintf(
+                                      stderr, ":%u", ntohs(pkt->pkt_dport));
+                            }
+                            fprintf(stderr, "\n");
                         }
-                        fprintf(stderr, "to %s",
-                              prefix2str(pkt->pkt_dst, str2, sizeof(str2)));
-                        if (pkt->pkt_dport) {
-                            fprintf(stderr, ":%u", ntohs(pkt->pkt_dport));
-                        }
-                        fprintf(stderr, "\n");
+                        data_pkts_recvd++;
                     }
                     relay_forward(pkt);
                     break;
@@ -1074,23 +1377,26 @@ relay_packet_deq(int fd, short event, void* uap)
                     }
             }
             relay_pkt_free(pkt);
-        }
+            deq_pkt_cnt++;
 
-        /*
-         * traverse priority queues
-         */
-        switch (queue) {
-            case HIGH:
-                queue = MEDIUM;
-                break;
+        } else { // RX - don't switch queue yet; keep dequeing...
+                 /*
+                  * traverse priority queues
+              */
+            switch (queue) {
+                case HIGH:
+                    queue = MEDIUM;
+                    break;
 
-            case MEDIUM:
-                queue = LOW;
-                break;
+                case MEDIUM:
+                    queue = LOW;
+                    break;
 
-            case LOW:
-            default:
-                queue = NUM_QUEUES;
+                case LOW:
+                default:
+                    queue = NUM_QUEUES;
+            }
+            deq_pkt_cnt = 0;
         }
     }
     if (finished) {
@@ -1113,7 +1419,7 @@ relay_packet_deq(int fd, short event, void* uap)
 static void
 relay_packet_enq(relay_instance* instance, packet* pkt)
 {
-    int usec;
+    struct timeval time_stamp;
 
     /*
      * Place the received packet on the input queue for processing
@@ -1129,6 +1435,10 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
     switch (pkt->pkt_amt) {
         case AMT_MCAST_DATA:
             pkt->pkt_queue = HIGH;
+            gettimeofday(&time_stamp, NULL);
+            pkt->enq_time =
+                  time_stamp.tv_sec * 1000000 + time_stamp.tv_usec;
+            instance->stats.mcast_data_recvd++;
             break;
 
         case AMT_REQUEST:
@@ -1148,14 +1458,13 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
      * Make sure the input queue timer is running so the queue will
      * get drained.
      */
-    usec = AMT_PACKET_Q_USEC;
 
     if (!evtimer_pending(&instance->relay_pkt_timer, NULL)) {
         int rc;
         struct timeval tv;
 
         timerclear(&tv);
-        tv.tv_usec = usec;
+        tv.tv_usec = AMT_PACKET_Q_USEC;
         evtimer_set(&instance->relay_pkt_timer, relay_packet_deq, instance);
         rc = evtimer_add(&instance->relay_pkt_timer, &tv);
         if (rc < 0) {
@@ -1175,10 +1484,10 @@ relay_message_read(relay_instance* instance, int fd)
     struct msghdr msghdr;
     struct sockaddr* srcsock;
     struct sockaddr_in* in;
+    struct sockaddr_in6* in6;
     int ctl_left, len, rc;
     u_int8_t *ctlptr, *cp;
     struct cmsghdr* cmsgptr;
-    struct sockaddr_dl* dl_addr;
     packet* pkt;
 
     bzero(&iovec, sizeof(iovec));
@@ -1265,7 +1574,6 @@ relay_message_read(relay_instance* instance, int fd)
              */
             ctlptr = ctlbuf;
             ctl_left = msghdr.msg_controllen;
-            dl_addr = NULL;
             while (ctl_left > (int)sizeof(struct cmsghdr)) {
                 cmsgptr = (struct cmsghdr*)ctlptr;
 #ifdef BSD
@@ -1285,7 +1593,6 @@ relay_message_read(relay_instance* instance, int fd)
                           AF_INET, CMSG_DATA(cmsgptr), INET_HOST_LEN);
                 }
 #else
-                (void)dl_addr;
                 if (cmsgptr->cmsg_level == SOL_IP &&
                       cmsgptr->cmsg_type == IP_PKTINFO) {
                     struct in_pktinfo* pktinfo =
@@ -1301,9 +1608,39 @@ relay_message_read(relay_instance* instance, int fd)
             }
             break;
 
-        case AF_INET6:
-            fprintf(stderr, "Family INET6 not yet supported.\n");
+        case AF_INET6: {
+            in6 = (struct sockaddr_in6*)srcsock;
+            len = msghdr.msg_namelen;
+            if (len < sizeof(*in6))
+                goto fail;
+
+            pkt->pkt_src = prefix_build(
+                  AF_INET6, in6->sin6_addr.s6_addr, INET6_HOST_LEN);
+            pkt->pkt_sport = in6->sin6_port;
+
+            /*
+         * Get the incoming interface index for filter comparisons.
+         * Get the destination IP address to find anycast packets.
+         */
+            ctlptr = ctlbuf;
+            ctl_left = msghdr.msg_controllen;
+            while (ctl_left > (int)sizeof(struct cmsghdr)) {
+                cmsgptr = (struct cmsghdr*)ctlptr;
+                if (cmsgptr->cmsg_level == SOL_IPV6 &&
+                      cmsgptr->cmsg_type == IPV6_PKTINFO) {
+                    struct in6_pktinfo* pktinfo = 
+                          (struct in6_pktinfo*)CMSG_DATA(cmsgptr);
+                    struct in6_addr s_addr = pktinfo->ipi6_addr;
+                    pkt->pkt_dst = prefix_build(
+                          AF_INET6, s_addr.s6_addr, INET6_HOST_LEN);
+                    pkt->pkt_ifindex = pktinfo->ipi6_ifindex;
+                }
+                ctl_left -= cmsgptr->cmsg_len;
+                ctlptr += cmsgptr->cmsg_len;
+            }
+
             break;
+        }
 
         default:
             assert(pkt->pkt_af == AF_INET || pkt->pkt_af == AF_INET6);
@@ -1318,7 +1655,7 @@ relay_message_read(relay_instance* instance, int fd)
         case AMT_RELAY_DISCOVERY:
         case AMT_REQUEST:
         case AMT_MEMBERSHIP_CHANGE:
-            pkt->pkt_dport = htons(AMT_PORT);
+            pkt->pkt_dport = htons(instance->amt_port);
         /* fall through */
 
         case AMT_RELAY_ADVERTISEMENT:
@@ -1608,6 +1945,19 @@ relay_accept_url(int fd, short __unused flags, void* uap)
     bufferevent_setwatermark(url->url_bufev, EV_READ, (size_t)0, (size_t)0);
 }
 
+/*
+static void
+print_pat(patext* pat)
+{
+    int i;
+
+    for (i = 0; i < (pat->keysize >> 3); i++) {
+        fprintf(stderr, "%c", pat->key[i]);
+    }
+    fprintf(stderr, " %u\n", pat->keysize);
+}
+*/
+
 void
 relay_pcap_read(u_char* uap,
       const struct pcap_pkthdr* pkthdr,
@@ -1618,14 +1968,22 @@ relay_pcap_read(u_char* uap,
     relay_instance* instance;
     struct ether_header* ether;
     struct ip* ip;
+    struct ip6_hdr* ip6;
     u_int8_t* ap;
+    prefix_t* pfx;
+    patext* pat;
+    int enq = 0;
+    char src[MAX_ADDR_STRLEN], dst[MAX_ADDR_STRLEN];
 
     ip = NULL;
     instance = (relay_instance*)uap;
 
+    instance->stats.pcap_data_recvd1++;
+
     if (pkthdr->caplen != pkthdr->len) {
-        fprintf(stderr, "Received short packet over pcap %u of %u\n",
-              pkthdr->caplen, pkthdr->len);
+        if (relay_debug(instance))
+            fprintf(stderr, "Received short packet over pcap %u of %u\n",
+                  pkthdr->caplen, pkthdr->len);
         return;
     }
     len = pkthdr->len;
@@ -1639,6 +1997,9 @@ relay_pcap_read(u_char* uap,
         case DLT_EN10MB:
             ether = (struct ether_header*)cp;
             if (ntohs(ether->ether_type) != ETHERTYPE_IP) {
+                if (relay_debug(instance))
+                    fprintf(stderr, "Wrong Ethernet type %d\n",
+                          ntohs(ether->ether_type));
                 return;
             }
             cp += 14;
@@ -1655,38 +2016,26 @@ relay_pcap_read(u_char* uap,
             len -= 16;
             break;
         default:
-            fprintf(stderr, "pcap receive, unknown datalink type %d\n",
-                  instance->relay_datalink);
+            if (relay_debug(instance))
+                fprintf(stderr, "pcap receive, unknown datalink type %d\n",
+                      instance->relay_datalink);
             return;
     }
 
     if (len == 0) {
-        fprintf(stderr, "AMT DATA packet too small\n");
+        if (relay_debug(instance))
+            fprintf(stderr, "AMT DATA packet too small\n");
         return;
     }
     if (len > BUFFER_SIZE) {
-        fprintf(stderr, "AMT DATA packet too big\n");
+        if (relay_debug(instance))
+            fprintf(stderr, "AMT DATA packet too big\n");
         return;
     }
 
-    switch (instance->relay_af) {
-
-        case AF_INET:
-            ip = (struct ip*)cp;
-            /*
-             * don't forward TTL 1 packets
-             */
-            if (ip->ip_ttl == 1) {
-                return;
-            }
-            break;
-
-        case AF_INET6:
-            return;
-    }
-
     pkt = relay_pkt_get(instance);
-    pkt->pkt_af = instance->relay_af;
+    pkt->pkt_af = instance->tunnel_af;
+    // pkt->pkt_af = instance->relay_af;
     pkt->pkt_amt = AMT_MCAST_DATA;
 
     /*
@@ -1697,16 +2046,21 @@ relay_pcap_read(u_char* uap,
     *ap++ = 0; /* reserved */
 
     /* Draft-07 changes */
-    len += sizeof(u_int16_t);
     bcopy(cp, ap, len);
 
     len += sizeof(u_int16_t);
 
     pkt->pkt_len = len;
 
-    switch (instance->relay_af) {
-
+    switch (instance->tunnel_af) {
         case AF_INET:
+            ip = (struct ip*)cp;
+            if (ip->ip_ttl == 1) {
+                if (relay_debug(instance))
+                    fprintf(stderr, "IP packet with ttl 1\n");
+                relay_pkt_free(pkt);
+                return;
+            }
             pkt->pkt_src =
                   prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
             pkt->pkt_dst =
@@ -1714,10 +2068,53 @@ relay_pcap_read(u_char* uap,
             break;
 
         case AF_INET6:
+            ip6 = (struct ip6_hdr*)cp;
+            if (ip6->ip6_hops == 1) {
+                if (relay_debug(instance))
+                    fprintf(stderr, "IP6 packet with ttl 1\n");
+                relay_pkt_free(pkt);
+                return;
+            }
+            pkt->pkt_src = prefix_build(
+                  AF_INET6, ip6->ip6_src.s6_addr, INET6_HOST_LEN);
+            pkt->pkt_dst = prefix_build(
+                  AF_INET6, ip6->ip6_dst.s6_addr, INET6_HOST_LEN);
             break;
+        default:
+            if (relay_debug(instance))
+                fprintf(stderr, "Unknown IP version\n");
+            relay_pkt_free(pkt);
+            return;
     }
 
-    relay_packet_enq(instance, pkt);
+    /* count the number of pcap packets */
+    instance->stats.pcap_data_recvd2++;
+
+    /* enqueue only needed pkts */
+    pfx = prefix_dup(pkt->pkt_dst);
+    pat = pat_get(
+          &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
+    if (pat) {
+        enq = 1;
+    } else {
+        pfx = prefix_build_mcast(pkt->pkt_dst, pkt->pkt_src);
+        pat = pat_get(
+              &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
+        if (pat)
+            enq = 1;
+    }
+
+    if (enq == 1)
+        relay_packet_enq(instance, pkt);
+    else {
+        if (relay_debug(instance))
+            fprintf(stderr, "pkt not subscribed: %s -> %s\n",
+                  prefix2str(pkt->pkt_src, src, MAX_ADDR_STRLEN),
+                  prefix2str(pkt->pkt_dst, dst, MAX_ADDR_STRLEN));
+        relay_pkt_free(pkt);
+    }
+
+    prefix_free(pfx);
 }
 
 static void
@@ -1729,7 +2126,7 @@ relay_pcap_event_read(int fd, short __unused flags, void* uap)
     instance = (relay_instance*)uap;
 
     do {
-        rc = pcap_dispatch(instance->relay_pcap, 1, relay_pcap_read, uap);
+        rc = pcap_dispatch(instance->relay_pcap, -1, relay_pcap_read, uap);
     } while (rc > 0);
 }
 
@@ -1745,6 +2142,10 @@ relay_pcap_create(relay_instance* instance)
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* pd;
 
+    if (relay_debug(instance)) {
+        fprintf(stderr, "relay_pcap_create call\n");
+    }
+
 #if 0
     device = pcap_lookupdev(errbuf);
     if (device == NULL) {
@@ -1752,9 +2153,40 @@ relay_pcap_create(relay_instance* instance)
 	exit(1);
     }
 #endif
-    pd = pcap_open_live(device, 1500, 0, 0, errbuf);
+    pd = pcap_create(device, errbuf);
+    // pd = pcap_open_live(device, 1500, 0, 0, errbuf);
     if (pd == NULL) {
         fprintf(stderr, "error opening pcap device: %s\n", errbuf);
+        exit(1);
+    }
+
+    if (pcap_set_snaplen(pd, 1500) != 0) {
+        fprintf(
+              stderr, "error setting pcap snaplen: %s\n", pcap_geterr(pd));
+        exit(1);
+    }
+
+    if (pcap_set_promisc(pd, 0) != 0) {
+        fprintf(stderr, "error setting pcap to non-promisc: %s\n",
+              pcap_geterr(pd));
+        exit(1);
+    }
+
+    if (pcap_set_timeout(pd, 0) != 0) {
+        fprintf(
+              stderr, "error setting pcap timeout: %s\n", pcap_geterr(pd));
+        exit(1);
+    }
+
+    if (pcap_set_buffer_size(pd, instance->pcap_buffer_size) != 0) {
+        fprintf(stderr, "error setting pcap buffer size: %s\n",
+              pcap_geterr(pd));
+        exit(1);
+    }
+
+    if (pcap_activate(pd) != 0) {
+        fprintf(
+              stderr, "error setting pcap activate: %s\n", pcap_geterr(pd));
         exit(1);
     }
 
@@ -1777,8 +2209,8 @@ relay_pcap_create(relay_instance* instance)
         exit(1);
     }
 
-    rc = pcap_compile(
-          pd, &instance->relay_fcode, "ip multicast", 0, netmask);
+    rc = pcap_compile(pd, &instance->relay_fcode,
+          "ip multicast or ip6 multicast", 0, netmask);
     if (rc < 0) {
         fprintf(stderr, "error compiling pcap expression: %s\n",
               pcap_geterr(pd));
@@ -1825,6 +2257,10 @@ relay_pcap_destroy(relay_instance* instance)
     /*
      * Don't listen for traffic on this socket any more
      */
+    if (relay_debug(instance)) {
+        fprintf(stderr, "relay_pcap_destroy call\n");
+    }
+
     rc = event_del(&instance->relay_pcap_ev);
     if (rc < 0) {
         fprintf(stderr, "error from event_del on pcap: %s\n",

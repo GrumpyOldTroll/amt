@@ -50,6 +50,7 @@ static const char __attribute__((unused)) id[] =
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "../libprefix/prefix.h"
 #include "amt.h"
 #include "memory.h"
 #include "pat.h"
@@ -107,6 +108,19 @@ relay_gw_free(gw_t* gw)
     }
 }
 
+static int
+family2level(int family)
+{
+    switch (family) {
+        case AF_INET:
+            return IPPROTO_IP;
+        case AF_INET6:
+            return IPPROTO_IPV6;
+        default:
+            return -1;
+    }
+}
+
 /*
  * Leave the group and delete the socket if there are no other sources
  */
@@ -114,22 +128,100 @@ static int
 membership_leave(sgnode* sg)
 {
     int rc = 0;
-    struct ip_mreq imr;
-    // relay_instance *instance;
+    relay_instance* instance;
 
-    // instance = sg->sg_instance;
+    instance = sg->sg_instance;
+
+    if (relay_debug(instance)) {
+        char src_addr[MAX_ADDR_STRLEN], group_addr[MAX_ADDR_STRLEN];
+        if (sg->sg_source)
+            fprintf(stderr, "Sending leave msg: %s/%s\n",
+                  prefix2str(sg->sg_source, src_addr, MAX_ADDR_STRLEN),
+                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+        else
+            fprintf(stderr, "Sending leave msg: %s\n",
+                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+    }
 
     /*
-   * Drop the source/group membership
-   */
+     * Drop the source/group membership
+     */
     if (!sg->sg_source) {
-        bcopy(prefix_key(sg->sg_group), &imr.imr_multiaddr.s_addr,
-              sizeof(struct in_addr));
-        imr.imr_interface.s_addr = 0;
-        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_DROP_MEMBERSHIP,
-              (char*)&imr, sizeof(struct ip_mreq));
+        struct group_req greq;
+        greq.gr_interface = instance->cap_iface_index;
+        switch (instance->tunnel_af)
+        /* switch(instance->relay_af) */
+        {
+            case AF_INET: {
+                struct sockaddr_in group_addr;
+                bzero(&group_addr, sizeof(group_addr));
+                group_addr.sin_family = AF_INET;
+                bcopy(prefix_key(sg->sg_group), &group_addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&group_addr, &greq.gr_group, sizeof(group_addr));
+                break;
+            }
+            case AF_INET6: {
+                struct sockaddr_in6 group_addr;
+                bzero(&group_addr, sizeof(group_addr));
+                group_addr.sin6_family = AF_INET6;
+                bcopy(prefix_key(sg->sg_group),
+                      group_addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&group_addr, &greq.gr_group, sizeof(group_addr));
+                break;
+            }
+        }
+
+        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
+              /* family2level(instance->relay_af) */,
+              MCAST_LEAVE_GROUP, &greq, sizeof(greq));
+
         if (rc < 0) {
-            fprintf(stderr, "error IP_DROP_MEMBERSHIP sg socket: %s\n",
+            fprintf(stderr, "error MCAST_LEAVE_GROUP sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+    } else {
+        /* SSM */
+        struct group_source_req gsreq;
+        gsreq.gsr_interface = instance->cap_iface_index;
+        switch (instance->tunnel_af)
+        /* switch(instance->relay_af) */
+        {
+            case AF_INET: {
+                struct sockaddr_in addr;
+                bzero(&addr, sizeof(addr));
+                addr.sin_family = AF_INET;
+                bcopy(prefix_key(sg->sg_source), &addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&addr, &gsreq.gsr_source, sizeof(addr));
+                bcopy(prefix_key(sg->sg_group), &addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&addr, &gsreq.gsr_group, sizeof(addr));
+                break;
+            }
+            case AF_INET6: {
+                struct sockaddr_in6 addr;
+                bzero(&addr, sizeof(addr));
+                addr.sin6_family = AF_INET6;
+                bcopy(prefix_key(sg->sg_source), addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&addr, &gsreq.gsr_source, sizeof(addr));
+                bcopy(prefix_key(sg->sg_group), addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&addr, &gsreq.gsr_group, sizeof(addr));
+                break;
+            }
+        }
+
+        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
+              /* family2level(instance->relay_af) */,
+              MCAST_LEAVE_SOURCE_GROUP, &gsreq, sizeof(gsreq));
+
+        if (rc < 0) {
+            fprintf(stderr,
+                  "error MCAST_LEAVE_SOURCE_GROUP sg socket: %s\n",
                   strerror(errno));
             exit(1);
         }
@@ -148,38 +240,101 @@ static int
 membership_join(sgnode* sg)
 {
     int rc;
-    struct ip_mreq imr;
-    struct ip_mreq_source imr_src;
     relay_instance* instance;
 
     instance = sg->sg_instance;
 
-    bzero(&imr, sizeof(struct ip_mreq));
+    if (relay_debug(instance)) {
+        char src_addr[MAX_ADDR_STRLEN], group_addr[MAX_ADDR_STRLEN];
+        if (sg->sg_source)
+            fprintf(stderr, "Sending join msg: %s/%s\n",
+                  prefix2str(sg->sg_source, src_addr, MAX_ADDR_STRLEN),
+                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+        else
+            fprintf(stderr, "Sending join msg: %s\n",
+                  prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+    }
+
     /*
-   * set the socket to non-blocking, etc.
-   */
-    sg->sg_socket = relay_socket_shared_init(instance->relay_af, NULL, 0);
+     * set the socket to non-blocking, etc.
+     */
+    /* sg->sg_socket = relay_socket_shared_init(instance->relay_af, NULL,
+     * 0); */
+    sg->sg_socket = relay_socket_shared_init(instance->tunnel_af, NULL, 0);
 
     if (sg->sg_source) {
-        bzero(&imr_src, sizeof(struct ip_mreq_source));
-        bcopy(prefix_key(sg->sg_source), &imr_src.imr_sourceaddr.s_addr,
-              sizeof(struct in_addr));
-        bcopy(prefix_key(sg->sg_group), &imr_src.imr_multiaddr.s_addr,
-              sizeof(struct in_addr));
-        imr_src.imr_interface.s_addr = INADDR_ANY;
-        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_ADD_SOURCE_MEMBERSHIP,
-              (char*)&imr_src, sizeof(struct ip_mreq_source));
+        /* SSM */
+        struct group_source_req gsreq;
+        gsreq.gsr_interface = instance->cap_iface_index;
+        switch (instance->tunnel_af)
+        /* switch(instance->relay_af) */
+        {
+            case AF_INET: {
+                struct sockaddr_in addr;
+                bzero(&addr, sizeof(addr));
+                addr.sin_family = AF_INET;
+                bcopy(prefix_key(sg->sg_source), &addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&addr, &gsreq.gsr_source, sizeof(addr));
+                bcopy(prefix_key(sg->sg_group), &addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&addr, &gsreq.gsr_group, sizeof(addr));
+                break;
+            }
+            case AF_INET6: {
+                struct sockaddr_in6 addr;
+                bzero(&addr, sizeof(addr));
+                addr.sin6_family = AF_INET6;
+                bcopy(prefix_key(sg->sg_source), addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&addr, &gsreq.gsr_source, sizeof(addr));
+                bcopy(prefix_key(sg->sg_group), addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&addr, &gsreq.gsr_group, sizeof(addr));
+                break;
+            }
+        }
+
+        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af),
+              MCAST_JOIN_SOURCE_GROUP, &gsreq, sizeof(gsreq));
+
+        if (rc < 0) {
+            fprintf(stderr, "error MCAST_JOIN_SOURCE_GROUP sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
     } else {
-        bcopy(prefix_key(sg->sg_group), &imr.imr_multiaddr.s_addr,
-              sizeof(struct in_addr));
-        imr.imr_interface.s_addr = INADDR_ANY;
-        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP,
-              (char*)&imr, sizeof(struct ip_mreq));
-    }
-    if (rc < 0) {
-        fprintf(stderr, "error IP_ADD_MEMBERSHIP sg socket: %s\n",
-              strerror(errno));
-        exit(1);
+        struct group_req greq;
+        greq.gr_interface = instance->cap_iface_index;
+        switch (instance->tunnel_af)
+        /* switch(instance->relay_af) */
+        {
+            case AF_INET: {
+                struct sockaddr_in addr;
+                addr.sin_family = AF_INET;
+                bcopy(prefix_key(sg->sg_group), &addr.sin_addr.s_addr,
+                      sizeof(struct in_addr));
+                bcopy(&addr, &greq.gr_group, sizeof(addr));
+                break;
+            }
+            case AF_INET6: {
+                struct sockaddr_in6 addr;
+                addr.sin6_family = AF_INET6;
+                bcopy(prefix_key(sg->sg_group), addr.sin6_addr.s6_addr,
+                      sizeof(struct in6_addr));
+                bcopy(&addr, &greq.gr_group, sizeof(addr));
+                break;
+            }
+        }
+
+        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
+              /* family2level(instance->relay_af) */,
+              MCAST_JOIN_GROUP, &greq, sizeof(greq));
+        if (rc < 0) {
+            fprintf(stderr, "error MCAST_JOIN_GROUP sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
     }
 
     return rc;
@@ -197,15 +352,139 @@ gw_find(sgnode* sg, prefix_t* pfx)
     return NULL;
 }
 
+/*int found = 0;
+static gw_t *find_gw = NULL;
+
+static void
+for_each_sg(patext *ext)
+{
+    sgnode *sg = pat2sg(ext);
+    if (gw_find(sg, &(find_gw->gw_dest)) != NULL)
+        ++found;
+}
+
+static int
+gw_num(gw_t *gw)
+{
+    sgnode *sg = gw->gw_sg;
+    relay_instance *instance = sg->sg_instance;
+    find_gw = gw;
+    found = 0;
+
+    if(!pat_empty(&(instance->relay_root)))
+        pat_walk(&(instance->relay_root), for_each_sg);
+    return found;
+}*/
+
 static void
 gw_delete(gw_t* gw)
 {
     sgnode* sg;
-
     sg = gw->gw_sg;
 
+    /* Delete this gw from the tree */
     pat_delete(&sg->sg_gwroot, &gw->gw_node);
+    /* Canncel the idle timer for this gw */
+    evtimer_del(&gw->idle_timer);
+
     relay_gw_free(gw);
+}
+
+static prefix_t* find_pfx = NULL;
+
+static void
+for_each_sg_del(patext* ext)
+{
+    sgnode* sg = pat2sg(ext);
+    relay_instance* instance = sg->sg_instance;
+    gw_t* gw;
+
+    if ((gw = gw_find(sg, find_pfx)) != NULL)
+        gw_delete(gw);
+
+    if (pat_empty(&sg->sg_gwroot))
+        TAILQ_INSERT_TAIL(&(instance->idle_sgs_list), sg, idle_next);
+}
+
+void
+icmp_delete_gw(relay_instance* instance, prefix_t* pfx)
+{
+    char str1[MAX_ADDR_STRLEN];
+    sgnode *sg, *tmp_sg;
+
+    find_pfx = pfx;
+
+    if (relay_debug(instance)) {
+        fprintf(stderr, "Delete gw %s due to the ICMP message\n",
+              prefix2str(pfx, str1, MAX_ADDR_STRLEN));
+    }
+
+    /* Delete the gw from sg tree */
+    if (!pat_empty(&(instance->relay_root))) {
+
+        pat_walk(&(instance->relay_root), for_each_sg_del);
+        for (sg = TAILQ_FIRST(&(instance->idle_sgs_list)); sg != NULL;
+              sg = tmp_sg) {
+            tmp_sg = TAILQ_NEXT(sg, idle_next);
+            TAILQ_REMOVE(&(instance->idle_sgs_list), sg, idle_next);
+
+            membership_leave(sg);
+            pat_delete(&instance->relay_root, &sg->sg_node);
+            relay_sgnode_free(sg);
+            /*
+             * remove the data link receive socket when the last
+             * sgnode is destroyed
+             */
+            if (--sgcount == 0) {
+                if (relay_pcap_destroy(instance)) {
+                    fprintf(stderr, "error destroying libpcap: %s\n",
+                          strerror(errno));
+                    exit(1);
+                }
+            }
+        }
+    }
+}
+
+/*
+ *  Delete a gw after some idle time
+ */
+void
+idle_delete(int fd, short event, void* arg)
+{
+    gw_t* gw = (gw_t*)arg;
+    sgnode* sg;
+    relay_instance* instance;
+    char str1[MAX_ADDR_STRLEN];
+
+    if (gw) {
+        sg = gw->gw_sg;
+        instance = sg->sg_instance;
+
+        if (relay_debug(instance)) {
+            fprintf(stderr, "Delete idle gw %s\n",
+                  prefix2str(&(gw->gw_dest), str1, MAX_ADDR_STRLEN));
+        }
+
+        gw_delete(gw);
+
+        if (pat_empty(&sg->sg_gwroot)) {
+            membership_leave(sg);
+            pat_delete(&instance->relay_root, &sg->sg_node);
+            relay_sgnode_free(sg);
+            /*
+             * remove the data link receive socket when the last
+             * sgnode is destroyed
+             */
+            if (--sgcount == 0) {
+                if (relay_pcap_destroy(instance)) {
+                    fprintf(stderr, "error destroying libpcap: %s\n",
+                          strerror(errno));
+                    exit(1);
+                }
+            }
+        }
+    }
 }
 
 /*
@@ -216,6 +495,8 @@ gw_add(sgnode* sg, prefix_t* pfx)
 {
     gw_t* gw;
     patext* pat;
+    struct timeval tv;
+    int rc;
 
     pat = pat_get(&sg->sg_gwroot, prefix_keylen(pfx), prefix_key(pfx));
     if (pat) {
@@ -227,6 +508,16 @@ gw_add(sgnode* sg, prefix_t* pfx)
         pat_key_set(&gw->gw_node, prefix_key(&gw->gw_dest));
         pat_keysize_set(&gw->gw_node, prefix_keylen(&gw->gw_dest));
         pat_add(&sg->sg_gwroot, &gw->gw_node);
+        /* Set the timer */
+        tv.tv_sec = GW_IDLE;
+        tv.tv_usec = 0;
+        evtimer_set(&gw->idle_timer, idle_delete, gw);
+        rc = evtimer_add(&gw->idle_timer, &tv);
+        if (rc < 0) {
+            fprintf(stderr, "can't initialize gw idle timer: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
     }
 
     return gw;
@@ -239,10 +530,27 @@ gw_update(gw_t* gw,
       prefix_t* pkt_dst,
       u_int16_t dport)
 {
+    struct timeval tv;
+    int rc;
+
     bcopy(pkt_dst, &gw->gw_src, sizeof(prefix_t));
     gw->gw_dport = sport;
     gw->gw_sport = dport;
     gw->gw_socket = sock;
+
+    if (evtimer_pending(&gw->idle_timer, NULL)) {
+        evtimer_del(&gw->idle_timer);
+    }
+
+    tv.tv_sec = GW_IDLE;
+    tv.tv_usec = 0;
+    evtimer_set(&gw->idle_timer, idle_delete, gw);
+    rc = evtimer_add(&gw->idle_timer, &tv);
+    if (rc < 0) {
+        fprintf(stderr, "can't initialize gw idle timer: %s\n",
+              strerror(errno));
+        exit(1);
+    }
 }
 
 static void
@@ -302,11 +610,12 @@ membership_tree_refresh(relay_instance* instance,
     sgnode* sg = NULL;
     gw_t* gw;
     prefix_t* pfx;
-    char str1[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
+    char str1[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN],
+          str3[MAX_ADDR_STRLEN], str4[MAX_ADDR_STRLEN];
 
     /*
-   * combine group/source into a single prefix
-   */
+     * combine group/source into a single prefix
+     */
     if (source) {
         pfx = prefix_build_mcast(group, source);
     } else {
@@ -325,10 +634,11 @@ membership_tree_refresh(relay_instance* instance,
     switch (mt) {
         case MEMBERSHIP_REPORT:
             if (!sg) {
+
                 /*
-             * create the data link receive socket when the first
-             * sgnode is created.
-             */
+                 * create the data link receive socket when the first
+                 * sgnode is created.
+                 */
                 if (sgcount++ == 0) {
                     if (relay_pcap_create(instance)) {
                         fprintf(stderr, "error initializing libpcap: %s\n",
@@ -348,9 +658,17 @@ membership_tree_refresh(relay_instance* instance,
                 sg->sg_gwroot = NULL;
             }
             if (relay_debug(instance)) {
-                fprintf(stderr, "Report for %s from %s\n",
+                fprintf(stderr, "Received %s membership report for %s/%s "
+                                "from %s:%u to %s:%u\n",
+                      (instance->tunnel_af == AF_INET) ? "INET" : "INET6",
                       prefix2str(sg->sg_group, str1, sizeof(str1)),
-                      prefix2str(pkt->pkt_src, str2, sizeof(str2)));
+                      (sg->sg_source == NULL)
+                            ? "None"
+                            : prefix2str(sg->sg_source, str2, sizeof(str2)),
+                      prefix2str(pkt->pkt_src, str3, sizeof(str3)),
+                      ntohs(pkt->pkt_sport),
+                      prefix2str(pkt->pkt_dst, str4, sizeof(str4)),
+                      ntohs(pkt->pkt_dport));
             }
             gw = gw_find(sg, pkt->pkt_src);
             if (!gw) {
@@ -358,9 +676,9 @@ membership_tree_refresh(relay_instance* instance,
             }
 
             /*
-           * Make sure we keep the latest address and port info
-           * so that data can come back through a firewall
-           */
+             * Make sure we keep the latest address and port info
+             * so that data can come back through a firewall
+             */
             gw_update(gw, pkt->pkt_fd, pkt->pkt_sport, pkt->pkt_dst,
                   pkt->pkt_dport);
 
@@ -372,9 +690,21 @@ membership_tree_refresh(relay_instance* instance,
         case MEMBERSHIP_LEAVE:
             if (sg) {
                 if (relay_debug(instance)) {
-                    fprintf(stderr, "Leave for %s from %s\n",
+                    fprintf(stderr, "Recevied %s leave message for %s/%s "
+                                    "from %s:%u to %s:%u\n",
+                          (instance->tunnel_af == AF_INET)
+                                /* (pkt->pkt_af == AF_INET)*/
+                                ? "INET"
+                                : "INET6",
                           prefix2str(sg->sg_group, str1, sizeof(str1)),
-                          prefix2str(pkt->pkt_src, str2, sizeof(str2)));
+                          (sg->sg_source == NULL)
+                                ? "None"
+                                : prefix2str(
+                                        sg->sg_source, str2, sizeof(str2)),
+                          prefix2str(pkt->pkt_src, str3, sizeof(str3)),
+                          ntohs(pkt->pkt_sport),
+                          prefix2str(pkt->pkt_dst, str4, sizeof(str4)),
+                          ntohs(pkt->pkt_dport));
                 }
                 gw = gw_find(sg, pkt->pkt_src);
                 if (gw) {
@@ -385,9 +715,9 @@ membership_tree_refresh(relay_instance* instance,
                         pat_delete(&instance->relay_root, &sg->sg_node);
                         relay_sgnode_free(sg);
                         /*
-                 * remove the data link receive socket when the last
-                 * sgnode is destroyed
-                 */
+                         * remove the data link receive socket when the last
+                         * sgnode is destroyed
+                         */
                         if (--sgcount == 0) {
                             if (relay_pcap_destroy(instance)) {
                                 fprintf(stderr,
@@ -399,13 +729,24 @@ membership_tree_refresh(relay_instance* instance,
                     }
                 } else {
                     if (relay_debug(instance)) {
-                        fprintf(stderr,
-                              "Leave for group not joined by gateway\n");
+                        fprintf(stderr, "Leave for group %s/%s not joined "
+                                        "by gateway %s:%u\n",
+                              prefix2str(sg->sg_group, str1, sizeof(str1)),
+                              (sg->sg_source == NULL)
+                                    ? "None"
+                                    : prefix2str(sg->sg_source, str2,
+                                            sizeof(str2)),
+                              prefix2str(pkt->pkt_src, str3, sizeof(str3)),
+                              ntohs(pkt->pkt_sport));
                     }
                 }
             } else {
                 if (relay_debug(instance)) {
-                    fprintf(stderr, "Leave for group not joined\n");
+                    fprintf(stderr, "Leave for group %s/%s not joined\n",
+                          prefix2str(group, str1, sizeof(str1)),
+                          (source == NULL)
+                                ? "None"
+                                : prefix2str(source, str2, sizeof(str2)));
                 }
             }
             break;
@@ -424,6 +765,10 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
     struct sockaddr_in6 sin6;
     struct sockaddr* sa;
     relay_instance* instance;
+    char str1[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN],
+          str3[MAX_ADDR_STRLEN];
+    struct timeval time_stamp;
+    u_int64_t now;
 
     instance = sg->sg_instance;
 
@@ -446,29 +791,77 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
     }
 
     prefix2sock(&gw->gw_dest, sa);
-    sin.sin_port = gw->gw_dport;
+    if (instance->relay_af == AF_INET)
+        sin.sin_port = gw->gw_dport;
+    else
+        sin6.sin6_port = gw->gw_dport;
+
+    /* calculate the queueing delay */
+    gettimeofday(&time_stamp, NULL);
+    now = time_stamp.tv_sec * 1000000 + time_stamp.tv_usec;
+    instance->agg_qdelay += (now - pkt->enq_time);
+    instance->n_qsamples += 1;
 
     tries = 3;
     while (tries--) {
+        if (relay_debug(instance)) {
+            static unsigned int data_pkts_sent = 0;
+            if (data_pkts_sent % 1000 == 0) {
+                fprintf(stderr, "Sending %s data packet %u len %d from "
+                                "%s:%u to %s:%u\n",
+                      (pkt->pkt_af == AF_INET) ? "INET" : "INET6",
+                      data_pkts_sent, pkt->pkt_len,
+                      prefix2str(pkt->pkt_src, str1, sizeof(str1)),
+                      ntohs(pkt->pkt_sport),
+                      prefix2str(pkt->pkt_dst, str2, sizeof(str2)),
+                      ntohs(pkt->pkt_dport));
+
+                struct pcap_stat relay_pcap_stat;
+
+                fprintf(stderr, "ts: %llu mcast data recvd: %llu, mcast "
+                                "data sent: %llu\n",
+                      (unsigned long long)time_stamp.tv_sec,
+                      (unsigned long long)instance->stats.mcast_data_recvd,
+                      (unsigned long long)instance->stats.mcast_data_sent);
+                pcap_stats(instance->relay_pcap, &relay_pcap_stat);
+                fprintf(stderr, "pcap data recvd: %u, pcap data dropped: "
+                                "%u, pcap ifdrop %u\n",
+                      relay_pcap_stat.ps_recv, relay_pcap_stat.ps_drop,
+                      relay_pcap_stat.ps_ifdrop);
+            }
+            data_pkts_sent++;
+        }
         rc = sendto(gw->gw_socket, pkt->pkt_buffer, pkt->pkt_len,
               MSG_DONTWAIT, sa, salen);
         if (rc < 0) {
             switch (errno) {
                 case EINTR:
                     /* try again */
+                    if (relay_debug(instance))
+                        fprintf(stderr, "forwarding mcast data to %s got "
+                                        "interrupted\n",
+                              prefix2str(
+                                    &(gw->gw_src), str3, MAX_ADDR_STRLEN));
                     break;
 
                 default:
-                    fprintf(stderr, "forward packet error: %s",
-                          strerror(errno));
+                    if (relay_debug(instance))
+                        fprintf(stderr, "forward packet error: %s to %s\n",
+                              strerror(errno),
+                              prefix2str(
+                                    &(gw->gw_src), str3, MAX_ADDR_STRLEN));
                     return;
             }
         } else if (rc != pkt->pkt_len) {
-            fprintf(stderr, "forward packet short write %d out of %d\n", rc,
-                  pkt->pkt_len);
+            if (relay_debug(instance))
+                fprintf(stderr,
+                      "forward packet short write %d out of %d to %s\n", rc,
+                      pkt->pkt_len,
+                      prefix2str(&(gw->gw_src), str3, MAX_ADDR_STRLEN));
             return;
         } else {
             /* success */
+            instance->stats.mcast_data_sent++;
             return;
         }
     }

@@ -49,7 +49,7 @@
 
 #define AMT_PORT 2268
 /* XXX video packets are > 1300 Bytes */
-#define BUFFER_SIZE 1400
+#define BUFFER_SIZE 1500
 
 #define max(a, b) ((a) >= (b) ? (a) : (b))
 #define min(a, b) ((a) <= (b) ? (a) : (b))
@@ -64,6 +64,7 @@ typedef enum _amt_msg_t {
 } amt_msg_t;
 
 #define AMT_HOST_PLEN 32
+#define AMT_HOST6_PLEN 128
 #define AMT_SUBNET_RELAY_OCTET 0x01
 
 #define HMAC_LEN 16        /* bytes */

@@ -184,6 +184,9 @@ pat_add(pat_handle* handle, patext* ext)
         rn->pat_tbyte = RNBYTE(bitlen);
         rn->pat_tbit = RNBIT(bitlen);
         rn->pat_ext = ext;
+        rn->pat_left = NULL;
+        rn->pat_right = NULL;
+        rn->pat_parent = NULL;
         return;
     }
 
@@ -257,6 +260,9 @@ pat_add(pat_handle* handle, patext* ext)
     rn_add->pat_tbyte = RNBYTE(bitlen);
     rn_add->pat_tbit = RNBIT(bitlen);
     rn_add->pat_ext = ext;
+    rn_add->pat_left = NULL;
+    rn_add->pat_right = NULL;
+    rn_add->pat_parent = NULL;
     ext->patnodeptr = rn_add;
 
     /*
@@ -296,7 +302,10 @@ pat_add(pat_handle* handle, patext* ext)
         rn_new->pat_bit = dbit;
         rn_new->pat_tbyte = RNBYTE(dbit);
         rn_new->pat_tbit = RNBIT(dbit);
+        rn_new->pat_ext = NULL;
         rn_add->pat_parent = rn_new;
+        rn_add->pat_left = NULL;
+        rn_add->pat_right = NULL;
         if (BIT_TEST(addr[rn_new->pat_tbyte], rn_new->pat_tbit)) {
             rn_new->pat_right = rn_add;
             rn_new->pat_left = rn;
@@ -349,13 +358,13 @@ pat_delete(pat_handle* handle, patext* ext)
      */
     if (!(rn->pat_left) && !(rn->pat_right)) {
         rn_prev = rn->pat_parent;
-        patnode_free(rn);
 
         if (!rn_prev) {
             /*
              * Last guy in the tree, remove the root node pointer
              */
             *handle = NULL;
+            patnode_free(rn);
             return;
         }
 
@@ -365,6 +374,8 @@ pat_delete(pat_handle* handle, patext* ext)
             assert(rn_prev->pat_right == rn);
             rn_prev->pat_right = NULL;
         }
+
+        patnode_free(rn);
 
         if (rn_prev->pat_ext) {
             return;
@@ -411,13 +422,26 @@ pat_delete(pat_handle* handle, patext* ext)
     return;
 }
 
+/* void
+pat_walk(pat_handle handle, void (*func)(patext *))
+{
+    if (handle == NULL)
+        return;
+
+    if (handle->pat_ext)
+        (*func)(handle->pat_ext);
+
+    pat_walk(handle->pat_left, func);
+    pat_walk(handle->pat_right, func);
+}*/
+
 void
 pat_walk(pat_handle* handle, void (*func)(patext*))
 {
     patnode* rn = *handle;
 
     for (;;) {
-        if ((rn->pat_ext)) {
+        if (rn != NULL && (rn->pat_ext)) {
             (*func)(rn->pat_ext);
         }
 
