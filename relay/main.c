@@ -442,7 +442,7 @@ relay_signal_init(relay_instance* instance)
 static void
 usage(char* name)
 {
-    fprintf(stderr, "usage: %s -a anycast prefix/plen [-u1] [-d] [-q count "
+    fprintf(stderr, "usage: %s -a anycast prefix/plen [-d] [-q count "
                     "of packets to dequeue at once] [-t queuing delay "
                     "threshold (default 100 msec)] [-g DNS live test "
                     "listening port (default 80)] [-b AMT port (default "
@@ -460,15 +460,13 @@ relay_socket_shared_init(int family,
 {
     int rc, val, len, sock;
 
-    val = TRUE;
-    len = sizeof(val);
-
     sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         fprintf(stderr, "error creating socket: %s\n", strerror(errno));
         exit(1);
     }
 
+    val = TRUE; len = sizeof(val);
     rc = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &val, len);
     if (rc < 0) {
         fprintf(stderr, "error SO_REUSEADDR socket: %s\n", strerror(errno));
@@ -703,9 +701,6 @@ main(int argc, char** argv)
                     exit(1);
                 }
                 break;
-            case 'u':
-                instance->use_unicast_addr = 1;
-                break;
             case 'a': {
                 char* pstr = NULL;
                 pstr = strsep(&optarg, "/");
@@ -737,13 +732,6 @@ main(int argc, char** argv)
                                 exit(1);
                             }
                             real_listen_addr.sin_family = AF_INET;
-                            if (instance->use_unicast_addr == 1) {
-                                real_listen_addr.sin_addr = inet_makeaddr(
-                                      ntohl(prefix.s_addr), 0x0);
-                            } else {
-                                real_listen_addr.sin_addr = inet_makeaddr(
-                                      ntohl(prefix.s_addr), 0x1);
-                            }
                             bcopy(&real_listen_addr, &listen_addr,
                                   sizeof(real_listen_addr));
                         } else {
@@ -769,12 +757,6 @@ main(int argc, char** argv)
                                 exit(1);
                             }
                             real_listen_addr.sin6_family = AF_INET6;
-                            if (instance->use_unicast_addr == 1) {
-                                real_listen_addr.sin6_addr = prefix;
-                            } else {
-                                /* to-do: */
-                                real_listen_addr.sin6_addr = prefix;
-                            }
                             bcopy(&real_listen_addr, &listen_addr,
                                   sizeof(real_listen_addr));
                         } else {

@@ -124,7 +124,6 @@ typedef struct _relay_instance
     u_int16_t relay_url_port; /* port to listen for URL requests */
     char passphrase[NAMELEN]; /* local secret for HMAC-MD5 */
     u_int8_t packet_buffer[BUFFER_SIZE]; /* transmit/recv buffer */
-    u_int8_t use_unicast_addr;           /* Use Unicast address */
     u_int32_t dequeue_count; /* number of packets to dequeue at once */
     int dns_listen_sk;       /* For dns live test */
     u_int16_t dns_listen_port;
