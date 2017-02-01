@@ -1980,6 +1980,12 @@ relay_pcap_read(u_char* uap,
 
     instance->stats.pcap_data_recvd1++;
 
+    /*
+    if (relay_debug(instance)) {
+        fprintf(stderr, "got dispatch callback, caplen %u, pktlen %u\n",
+              pkthdr->caplen, pkthdr->len);
+    }
+    */
     if (pkthdr->caplen != pkthdr->len) {
         if (relay_debug(instance))
             fprintf(stderr, "Received short packet over pcap %u of %u\n",
@@ -2032,6 +2038,19 @@ relay_pcap_read(u_char* uap,
             fprintf(stderr, "AMT DATA packet too big\n");
         return;
     }
+
+    /*
+    if (relay_debug(instance)) {
+        printf("%02x%02x%02x%02x %02x%02x%02x%02x "
+               "%02x%02x%02x%02x %02x%02x%02x%02x\n"
+               "%02x%02x%02x%02x %02x%02x%02x%02x "
+               "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+               cp[0],cp[1],cp[2],cp[3],cp[4],cp[5],cp[6],cp[7],
+               cp[8],cp[9],cp[10],cp[11],cp[12],cp[13],cp[14],cp[15],
+               cp[16],cp[17],cp[18],cp[19],cp[20],cp[21],cp[22],cp[23],
+               cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31]);
+    }
+    */
 
     pkt = relay_pkt_get(instance);
     pkt->pkt_af = instance->tunnel_af;
@@ -2104,9 +2123,16 @@ relay_pcap_read(u_char* uap,
             enq = 1;
     }
 
-    if (enq == 1)
+    if (enq == 1) {
+        /*
+        if (relay_debug(instance)) {
+            fprintf(stderr, "pkt queued: %s -> %s\n",
+                  prefix2str(pkt->pkt_src, src, MAX_ADDR_STRLEN),
+                  prefix2str(pkt->pkt_dst, dst, MAX_ADDR_STRLEN));
+        }
+        */
         relay_packet_enq(instance, pkt);
-    else {
+    } else {
         if (relay_debug(instance))
             fprintf(stderr, "pkt not subscribed: %s -> %s\n",
                   prefix2str(pkt->pkt_src, src, MAX_ADDR_STRLEN),
@@ -2115,19 +2141,63 @@ relay_pcap_read(u_char* uap,
     }
 
     prefix_free(pfx);
+#define BLOCKING_DISPATCH 1
+
+#if BLOCKING_DISPATCH
+    // workaround for bug in dispatch:
+    // https://github.com/the-tcpdump-group/libpcap/issues/493
+    // That bug was conflicting with a race condition from using
+    // nonblocking, so i'd rarely get any packets on a slow iperf.
+    pcap_breakloop(instance->relay_pcap);
+#endif
 }
 
+static u_int pcap_errs = 0;
+static u_int pcap_packets = 0;
 static void
 relay_pcap_event_read(int fd, short __unused flags, void* uap)
 {
     int rc;
     relay_instance* instance;
+    // char msg[16] = {0};
 
     instance = (relay_instance*)uap;
 
     do {
-        rc = pcap_dispatch(instance->relay_pcap, -1, relay_pcap_read, uap);
+        rc = pcap_dispatch(instance->relay_pcap, 1, relay_pcap_read, uap);
+        if (rc > 0) {
+            pcap_packets += rc;
+        }
     } while (rc > 0);
+    if (rc == -1) {
+        if (relay_debug(instance)) {
+            fprintf(stderr, "pcap error (%u err/%u rx): %s\n", pcap_errs,
+                    pcap_packets, pcap_geterr(instance->relay_pcap));
+        }
+        pcap_errs += 1;
+    }
+    /*
+    else if (rc == -2) {
+        if (relay_debug(instance)) {
+            fprintf(stderr, "pcap breakloop (%u err/%u rx)\n", pcap_errs,
+                    pcap_packets);
+        }
+    } else {
+        if (rc != 0) {
+            snprintf(msg, sizeof(msg), "(%d) ", rc);
+        }
+    }
+    if (relay_debug(instance)) {
+        struct pcap_stat relay_pcap_stat;
+
+        pcap_stats(instance->relay_pcap, &relay_pcap_stat);
+        fprintf(stderr, "pcap_dispatch finished %s(%u err/%u rx): "
+                "%u rx, %u drp, %u ifdrp\n",
+                msg, pcap_errs, pcap_packets,
+                relay_pcap_stat.ps_recv, relay_pcap_stat.ps_drop,
+                relay_pcap_stat.ps_ifdrop);
+    }
+    */
 }
 
 int
@@ -2153,10 +2223,17 @@ relay_pcap_create(relay_instance* instance)
 	exit(1);
     }
 #endif
+    if (strlen(instance->cap_iface_name) != 0) {
+        device = instance->cap_iface_name;
+    }
+    if (relay_debug(instance)) {
+        fprintf(stderr, "opening pcap on %s\n", device?device:"(NULL)");
+    }
     pd = pcap_create(device, errbuf);
     // pd = pcap_open_live(device, 1500, 0, 0, errbuf);
     if (pd == NULL) {
-        fprintf(stderr, "error opening pcap device: %s\n", errbuf);
+        fprintf(stderr, "error opening pcap device %s: %s\n",
+                device?device:"(NULL)", errbuf);
         exit(1);
     }
 
@@ -2203,6 +2280,11 @@ relay_pcap_create(relay_instance* instance)
     }
 #endif /* BSD && BIOCIMMEDIATE */
 
+    localnet=0;
+    netmask = PCAP_NETMASK_UNKNOWN;
+    fprintf(stderr, "localnet: %08x, netmask: %08x\n", localnet, netmask);
+
+    /*
     rc = pcap_lookupnet(device, &localnet, &netmask, errbuf);
     if (rc < 0) {
         fprintf(stderr, "error lookupnet pcap: %s\n", errbuf);
@@ -2222,6 +2304,7 @@ relay_pcap_create(relay_instance* instance)
         fprintf(stderr, "error setting pcap filter: %s\n", pcap_geterr(pd));
         exit(1);
     }
+    */
 
     instance->relay_datalink = pcap_datalink(pd);
     if (instance->relay_datalink < 0) {
@@ -2230,7 +2313,7 @@ relay_pcap_create(relay_instance* instance)
         exit(1);
     }
 
-    rc = pcap_setnonblock(pd, TRUE, errbuf);
+    rc = pcap_setnonblock(pd, !BLOCKING_DISPATCH, errbuf);
     if (rc < 0) {
         fprintf(stderr, "error setting non block on pcap: %s\n",
               pcap_geterr(pd));

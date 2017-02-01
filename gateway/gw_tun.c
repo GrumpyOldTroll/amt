@@ -148,7 +148,12 @@ init_iftun_device(gw_t* gw)
         gw->tununit = 0;
 
         bzero(&ifr, sizeof(struct ifreq));
+#define USE_TAP 0
+#if USE_TAP
+        ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+#else
         ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+#endif
         rc = ioctl(fd, TUNSETIFF, &ifr);
         if (rc < 0) {
             fprintf(stderr,
@@ -241,18 +246,49 @@ gw_receive_tun(gw_t* gw, int fd)
             struct ip* ip;
             u_int8_t* cp;
             int iphlen;
+            int orig_len = len;
+#if USE_TAP
+cp=gw->packet_buffer;
+if ((cp[12] == 0x86 && cp[13] == 0xdd)) { // ipv6
+    return len;
+}
+if ((cp[12] == 0x08 && cp[13] == 0x06)) { // arp
+    return len;
+}
+if (len <= 14) {
+    return len;
+}
+if (!(cp[12] == 0x08 && cp[13] == 0x00)) {
+    printf("    rejected: eth 0x%02x%02x\n", cp[12], cp[13]);
+    return len;
+}
 
-            ip = (struct ip*)(gw->packet_buffer);
+            ip = (struct ip*)(&gw->packet_buffer[14]);
+            len -= 14;
+if (ip->ip_p == 0x11) { // udp
+    return len;
+}
+
+printf("%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n"
+       "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+cp[0],cp[1],cp[2],cp[3],cp[4],cp[5],cp[6],cp[7],
+cp[8],cp[9],cp[10],cp[11],cp[12],cp[13],cp[14],cp[15],
+cp[16],cp[17],cp[18],cp[19],cp[20],cp[21],cp[22],cp[23],
+cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31]);
+#else
+            ip = (struct ip*)gw->packet_buffer;
+#endif
+
             switch (ip->ip_p) {
                 case IPPROTO_IGMP:
                     iphlen = ip_get_hl(ip);
-                    cp = gw->packet_buffer + iphlen;
+                    cp = ((uint8_t*)ip) + iphlen;
                     switch (*cp) {
                         case IGMP_V1_MEMBERSHIP_REPORT:
                         case IGMP_V2_MEMBERSHIP_REPORT:
                         case IGMP_V2_LEAVE_GROUP:
                         case IGMPV3_HOST_MEMBERSHIP_REPORT:
-                            gw_request_start(gw, gw->packet_buffer, len);
+                            gw_request_start(gw, (uint8_t*)ip, len);
                             break;
                         case IGMP_HOST_MEMBERSHIP_QUERY:
                             break;
@@ -268,7 +304,7 @@ gw_receive_tun(gw_t* gw, int fd)
                           gw->name, ip->ip_p, len);
                     break;
             }
-            return len;
+            return orig_len;
         }
     }
     return -1;

@@ -143,6 +143,7 @@ typedef struct _relay_instance
     struct idle_sgs idle_sgs_list;
     unsigned int cap_iface_index;        /* Interface index to capture the
                                             multicast packets */
+    char cap_iface_name[16]; // IFNAMSIZ might be better here.
     struct sockaddr_storage tunnel_addr; /* IP address used in the tunnel */
 } relay_instance;
 

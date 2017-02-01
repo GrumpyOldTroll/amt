@@ -652,6 +652,12 @@ membership_tree_refresh(relay_instance* instance,
                 sg->sg_group = group;
                 sg->sg_source = source;
                 bcopy(pfx, &sg->sg_addr, sizeof(prefix_t));
+                if (relay_debug(instance)) {
+                    fprintf(stderr, "Set %s prefix filter for %s/%u\n",
+                      (instance->tunnel_af == AF_INET) ? "INET" : "INET6",
+                      prefix2str(pfx, str1, sizeof(str1)),
+                      prefix_keylen(pfx));
+                }
                 pat_key_set(&sg->sg_node, prefix_key(&sg->sg_addr));
                 pat_keysize_set(&sg->sg_node, prefix_keylen(&sg->sg_addr));
                 pat_add(&instance->relay_root, &sg->sg_node);

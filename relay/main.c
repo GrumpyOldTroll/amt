@@ -687,6 +687,10 @@ main(int argc, char** argv)
                     perror("bad capture interface name");
                     exit(1);
                 }
+                strncpy(instance->cap_iface_name, optarg,
+                        sizeof(instance->cap_iface_name));
+                instance->cap_iface_name[
+                    sizeof(instance->cap_iface_name)-1] = 0;
                 break;
             }
             case 'n':
