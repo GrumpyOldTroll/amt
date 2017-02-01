@@ -459,6 +459,7 @@ relay_socket_shared_init(int family,
       int bind_addr_len)
 {
     int rc, val, len, sock;
+    char str[MAX_ADDR_STRLEN];
 
     sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
@@ -476,7 +477,9 @@ relay_socket_shared_init(int family,
     if (bind_addr) {
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
-            fprintf(stderr, "error binding socket: %s\n", strerror(errno));
+            fprintf(stderr, "error binding socket (%s/%u): %s\n",
+                    inet_ntop(family, &bind_addr, str, sizeof(str)),
+                    bind_addr_len, strerror(errno));
             exit(1);
         }
     }
@@ -717,7 +720,8 @@ main(int argc, char** argv)
                 switch (instance->relay_af) {
                     case AF_INET: {
                         struct in_addr prefix;
-                        struct sockaddr_in real_listen_addr;
+                        struct sockaddr_in *addrp =
+                            (struct sockaddr_in*)&listen_addr;
                         rc = inet_pton(AF_INET, pstr, &prefix);
                         if (rc == 1) {
                             plen = strtol(optarg, NULL, 10);
@@ -731,9 +735,9 @@ main(int argc, char** argv)
                                       "anycast prefix length too long\n");
                                 exit(1);
                             }
-                            real_listen_addr.sin_family = AF_INET;
-                            bcopy(&real_listen_addr, &listen_addr,
-                                  sizeof(real_listen_addr));
+                            addrp->sin_family = AF_INET;
+                            bcopy(&prefix, &addrp->sin_addr,
+                                    sizeof(prefix));
                         } else {
                             fprintf(stderr, "bad anycast prefix\n");
                             exit(1);
@@ -742,7 +746,8 @@ main(int argc, char** argv)
                     }
                     case AF_INET6: {
                         struct in6_addr prefix;
-                        struct sockaddr_in6 real_listen_addr;
+                        struct sockaddr_in6 *addrp =
+                            (struct sockaddr_in6*)&listen_addr;
                         rc = inet_pton(AF_INET6, pstr, &prefix);
                         if (rc == 1) {
                             plen = strtol(optarg, NULL, 10);
@@ -756,9 +761,9 @@ main(int argc, char** argv)
                                       "anycast prefix length too long\n");
                                 exit(1);
                             }
-                            real_listen_addr.sin6_family = AF_INET6;
-                            bcopy(&real_listen_addr, &listen_addr,
-                                  sizeof(real_listen_addr));
+                            addrp->sin6_family = AF_INET6;
+                            bcopy(&prefix, &addrp->sin6_addr,
+                                    sizeof(prefix));
                         } else {
                             fprintf(stderr, "bad anycast prefix\n");
                             exit(1);
