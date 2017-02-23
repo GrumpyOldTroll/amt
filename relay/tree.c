@@ -37,7 +37,6 @@ static const char __attribute__((unused)) id[] =
 #include <assert.h>
 #include <event.h>
 #include <netinet/in.h>
-#include <pcap.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,7 +235,7 @@ membership_leave(sgnode* sg)
 /*
  * Create a socket to receive data for this group on and join the group
  */
-static int
+static void
 membership_join(sgnode* sg)
 {
     int rc;
@@ -246,28 +245,22 @@ membership_join(sgnode* sg)
 
     if (relay_debug(instance)) {
         char src_addr[MAX_ADDR_STRLEN], group_addr[MAX_ADDR_STRLEN];
-        if (sg->sg_source)
+        if (sg->sg_source) {
             fprintf(stderr, "Sending join msg: %s/%s\n",
                   prefix2str(sg->sg_source, src_addr, MAX_ADDR_STRLEN),
                   prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
-        else
+        } else {
             fprintf(stderr, "Sending join msg: %s\n",
                   prefix2str(sg->sg_group, group_addr, MAX_ADDR_STRLEN));
+        }
     }
 
-    /*
-     * set the socket to non-blocking, etc.
-     */
-    /* sg->sg_socket = relay_socket_shared_init(instance->relay_af, NULL,
-     * 0); */
-    sg->sg_socket = relay_socket_shared_init(instance->tunnel_af, NULL, 0);
-
+    relay_socket_init(sg);
     if (sg->sg_source) {
         /* SSM */
         struct group_source_req gsreq;
         gsreq.gsr_interface = instance->cap_iface_index;
         switch (instance->tunnel_af)
-        /* switch(instance->relay_af) */
         {
             case AF_INET: {
                 struct sockaddr_in addr;
@@ -307,7 +300,6 @@ membership_join(sgnode* sg)
         struct group_req greq;
         greq.gr_interface = instance->cap_iface_index;
         switch (instance->tunnel_af)
-        /* switch(instance->relay_af) */
         {
             case AF_INET: {
                 struct sockaddr_in addr;
@@ -327,8 +319,7 @@ membership_join(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
-              /* family2level(instance->relay_af) */,
+        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af),
               MCAST_JOIN_GROUP, &greq, sizeof(greq));
         if (rc < 0) {
             fprintf(stderr, "error MCAST_JOIN_GROUP sg socket: %s\n",
@@ -336,8 +327,6 @@ membership_join(sgnode* sg)
             exit(1);
         }
     }
-
-    return rc;
 }
 
 static gw_t*
@@ -385,7 +374,8 @@ gw_delete(gw_t* gw)
     /* Delete this gw from the tree */
     pat_delete(&sg->sg_gwroot, &gw->gw_node);
     /* Canncel the idle timer for this gw */
-    evtimer_del(&gw->idle_timer);
+    evtimer_del(gw->idle_timer);
+    event_free(gw->idle_timer);
 
     relay_gw_free(gw);
 }
@@ -430,17 +420,21 @@ icmp_delete_gw(relay_instance* instance, prefix_t* pfx)
 
             membership_leave(sg);
             pat_delete(&instance->relay_root, &sg->sg_node);
+            int rc;
+            rc = event_del(sg->sg_receive_ev);
+            if (rc < 0) {
+                fprintf(stderr, "error deleting sg event: %s\n",
+                        strerror(errno));
+                exit(1);
+            }
+            event_free(sg->sg_receive_ev);
             relay_sgnode_free(sg);
             /*
              * remove the data link receive socket when the last
              * sgnode is destroyed
              */
             if (--sgcount == 0) {
-                if (relay_pcap_destroy(instance)) {
-                    fprintf(stderr, "error destroying libpcap: %s\n",
-                          strerror(errno));
-                    exit(1);
-                }
+                // XXX: do I need something when out of sgs?
             }
         }
     }
@@ -471,24 +465,28 @@ idle_delete(int fd, short event, void* arg)
         if (pat_empty(&sg->sg_gwroot)) {
             membership_leave(sg);
             pat_delete(&instance->relay_root, &sg->sg_node);
+            int rc;
+            rc = event_del(sg->sg_receive_ev);
+            if (rc < 0) {
+                fprintf(stderr, "error deleting sg event: %s\n",
+                        strerror(errno));
+                exit(1);
+            }
+            event_free(sg->sg_receive_ev);
             relay_sgnode_free(sg);
             /*
              * remove the data link receive socket when the last
              * sgnode is destroyed
              */
             if (--sgcount == 0) {
-                if (relay_pcap_destroy(instance)) {
-                    fprintf(stderr, "error destroying libpcap: %s\n",
-                          strerror(errno));
-                    exit(1);
-                }
+                // XXX: do i need something when out of sgs?
             }
         }
     }
 }
 
 /*
- * We keep a tree of gateway's that we receive joins from in each sgnode
+ * We keep a tree of gateways that we receive joins from in each sgnode
  */
 static gw_t*
 gw_add(sgnode* sg, prefix_t* pfx)
@@ -508,11 +506,18 @@ gw_add(sgnode* sg, prefix_t* pfx)
         pat_key_set(&gw->gw_node, prefix_key(&gw->gw_dest));
         pat_keysize_set(&gw->gw_node, prefix_keylen(&gw->gw_dest));
         pat_add(&sg->sg_gwroot, &gw->gw_node);
+        if (relay_debug(sg->sg_instance)) {
+            char str[MAX_ADDR_STRLEN];
+            fprintf(stderr, "Added pat gateway sg=%p key=%s keylen=%u\n",
+                    sg, prefix2str(&gw->gw_dest, str, sizeof(str)),
+                    prefix_keylen(&gw->gw_dest));
+        }
         /* Set the timer */
         tv.tv_sec = GW_IDLE;
         tv.tv_usec = 0;
-        evtimer_set(&gw->idle_timer, idle_delete, gw);
-        rc = evtimer_add(&gw->idle_timer, &tv);
+        gw->idle_timer = evtimer_new(sg->sg_instance->event_base,
+                idle_delete, gw);
+        rc = evtimer_add(gw->idle_timer, &tv);
         if (rc < 0) {
             fprintf(stderr, "can't initialize gw idle timer: %s\n",
                   strerror(errno));
@@ -538,14 +543,14 @@ gw_update(gw_t* gw,
     gw->gw_sport = dport;
     gw->gw_socket = sock;
 
-    if (evtimer_pending(&gw->idle_timer, NULL)) {
-        evtimer_del(&gw->idle_timer);
+    if (evtimer_pending(gw->idle_timer, NULL)) {
+        evtimer_del(gw->idle_timer);
     }
 
     tv.tv_sec = GW_IDLE;
     tv.tv_usec = 0;
-    evtimer_set(&gw->idle_timer, idle_delete, gw);
-    rc = evtimer_add(&gw->idle_timer, &tv);
+    evtimer_set(gw->idle_timer, idle_delete, gw);
+    rc = evtimer_add(gw->idle_timer, &tv);
     if (rc < 0) {
         fprintf(stderr, "can't initialize gw idle timer: %s\n",
               strerror(errno));
@@ -640,11 +645,7 @@ membership_tree_refresh(relay_instance* instance,
                  * sgnode is created.
                  */
                 if (sgcount++ == 0) {
-                    if (relay_pcap_create(instance)) {
-                        fprintf(stderr, "error initializing libpcap: %s\n",
-                              strerror(errno));
-                        exit(1);
-                    }
+                    // XXX: do I need something on first sg?
                 }
 
                 sg = relay_sgnode_get(instance);
@@ -719,18 +720,21 @@ membership_tree_refresh(relay_instance* instance,
                     if (pat_empty(&sg->sg_gwroot)) {
                         membership_leave(sg);
                         pat_delete(&instance->relay_root, &sg->sg_node);
+                        int rc;
+                        rc = event_del(sg->sg_receive_ev);
+                        if (rc < 0) {
+                            fprintf(stderr, "error deleting sg event: %s\n",
+                                    strerror(errno));
+                            exit(1);
+                        }
+                        event_free(sg->sg_receive_ev);
                         relay_sgnode_free(sg);
                         /*
                          * remove the data link receive socket when the last
                          * sgnode is destroyed
                          */
                         if (--sgcount == 0) {
-                            if (relay_pcap_destroy(instance)) {
-                                fprintf(stderr,
-                                      "error destroying libpcap: %s\n",
-                                      strerror(errno));
-                                exit(1);
-                            }
+                            // XXX: do i need something when out of sgs?
                         }
                     }
                 } else {
@@ -808,6 +812,21 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
     instance->agg_qdelay += (now - pkt->enq_time);
     instance->n_qsamples += 1;
 
+    /*
+    uint8_t* cp = pkt->pkt_data;
+    if (relay_debug(instance)) {
+        printf("%02x%02x%02x%02x %02x%02x%02x%02x "
+               "%02x%02x%02x%02x %02x%02x%02x%02x\n"
+               "%02x%02x%02x%02x %02x%02x%02x%02x "
+               "%02x%02x%02x%02x %02x%02x%02x%02x (len=%u gw_forward %p)\n",
+               cp[0],cp[1],cp[2],cp[3],cp[4],cp[5],cp[6],cp[7],
+               cp[8],cp[9],cp[10],cp[11],cp[12],cp[13],cp[14],cp[15],
+               cp[16],cp[17],cp[18],cp[19],cp[20],cp[21],cp[22],cp[23],
+               cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31],
+               pkt->pkt_len, gw);
+    }
+    */
+
     tries = 3;
     while (tries--) {
         if (relay_debug(instance)) {
@@ -822,22 +841,15 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
                       prefix2str(pkt->pkt_dst, str2, sizeof(str2)),
                       ntohs(pkt->pkt_dport));
 
-                struct pcap_stat relay_pcap_stat;
-
                 fprintf(stderr, "ts: %llu mcast data recvd: %llu, mcast "
                                 "data sent: %llu\n",
                       (unsigned long long)time_stamp.tv_sec,
                       (unsigned long long)instance->stats.mcast_data_recvd,
                       (unsigned long long)instance->stats.mcast_data_sent);
-                pcap_stats(instance->relay_pcap, &relay_pcap_stat);
-                fprintf(stderr, "pcap data recvd: %u, pcap data dropped: "
-                                "%u, pcap ifdrop %u\n",
-                      relay_pcap_stat.ps_recv, relay_pcap_stat.ps_drop,
-                      relay_pcap_stat.ps_ifdrop);
             }
             data_pkts_sent++;
         }
-        rc = sendto(gw->gw_socket, pkt->pkt_buffer, pkt->pkt_len,
+        rc = sendto(gw->gw_socket, pkt->pkt_data, pkt->pkt_len,
               MSG_DONTWAIT, sa, salen);
         if (rc < 0) {
             switch (errno) {
@@ -882,6 +894,10 @@ forward_mcast_data(packet* pkt, patext* pat)
     if (pat) {
         sg->sg_packets++;
         sg->sg_bytes += pkt->pkt_len;
+    } else {
+        if (relay_debug(sg->sg_instance)) {
+            fprintf(stderr, "forward_mcast_data: no gateway for %p\n", sg);
+        }
     }
     while (pat) {
         gw_t* gw;
@@ -913,15 +929,39 @@ relay_forward(packet* pkt)
     pfx = prefix_build_mcast(pkt->pkt_dst, pkt->pkt_src);
     pat = pat_get(
           &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
+
     if (pat) {
+        /*
+        if (relay_debug(instance)) {
+            sgnode* sg = pat2sg(pat);
+            char str[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
+            fprintf(stderr, "forwarding s,g %s -> %s (%p)\n",
+                    prefix2str(pkt->pkt_src, str, sizeof(str)),
+                    prefix2str(pkt->pkt_dst, str2, sizeof(str2)), sg);
+        }
+        */
         forward_mcast_data(pkt, pat);
+    } else {
+        /* Otherwise cater ASM requests */
+        pat = pat_get(&instance->relay_root, prefix_keylen(pkt->pkt_dst),
+              prefix_key(pkt->pkt_dst));
+        /*
+        if (relay_debug(instance)) {
+            sgnode* sg = 0;
+            if (pat) {
+                sg = pat2sg(pat);
+            }
+            char str[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
+            fprintf(stderr, "forwarding g %s -> %s (%p)\n",
+                    prefix2str(pkt->pkt_src, str, sizeof(str)),
+                    prefix2str(pkt->pkt_dst, str2, sizeof(str2)), sg);
+        }
+        */
+        if (pat) {
+            forward_mcast_data(pkt, pat);
+        }
     }
     prefix_free(pfx);
 
-    /* Otherwise cater ASM requests */
-    pat = pat_get(&instance->relay_root, prefix_keylen(pkt->pkt_dst),
-          prefix_key(pkt->pkt_dst));
-    if (pat) {
-        forward_mcast_data(pkt, pat);
-    }
 }
+

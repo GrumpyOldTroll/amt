@@ -91,6 +91,9 @@ static inline void
 prefix2sin6(prefix_t* pfx, struct sockaddr_in6* sin6)
 {
     bzero(sin6, sizeof(struct sockaddr_in6));
+#ifdef BSD
+    sin6->sin6_len = sizeof(struct sockaddr_in6);
+#endif
     sin6->sin6_family = pfx->family;
     sin6->sin6_addr = pfx->addr.sin6;
 }

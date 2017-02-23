@@ -85,8 +85,6 @@ typedef struct _relay_stats
     u_int32_t relay_advertisement_unexpected; /* relay received adv */
     u_int64_t mcast_data_recvd;
     u_int64_t mcast_data_sent;
-    u_int64_t pcap_data_recvd1;
-    u_int64_t pcap_data_recvd2;
 } relay_stats;
 
 #define RELAY_FLAG_DEBUG 0x1
@@ -109,18 +107,14 @@ typedef struct _relay_instance
     int tunnel_af;          /* address family for tunneled protocols*/
     void* relay_context;    /* event context */
     int relay_anycast_sock; /* anycast socket */
-    struct event relay_anycast_ev;       /* libevent handle */
+    struct event *relay_anycast_ev;       /* libevent handle */
     pat_handle relay_root;               /* group/source patricia tree */
     pat_handle rif_root;                 /* src address patricia tree */
     struct packets pkt_head[NUM_QUEUES]; /* priority queued packets */
-    struct event relay_pkt_timer;        /* pointer to timer handle */
-    pcap_t* relay_pcap;                  /* pcap device handle */
-    struct bpf_program relay_fcode;      /* pcap compiled filter */
-    int relay_datalink;                  /* datalink used in pcap */
-    struct event relay_pcap_ev;          /* libevent handle */
+    struct event *relay_pkt_timer;        /* pointer to timer handle */
     relay_stats stats;                   /* statistics */
     int relay_url_sock;                  /* socket for URL requests */
-    struct event relay_url_ev;           /* libevent handle */
+    struct event *relay_url_ev;           /* libevent handle */
     u_int16_t relay_url_port; /* port to listen for URL requests */
     char passphrase[NAMELEN]; /* local secret for HMAC-MD5 */
     u_int8_t packet_buffer[BUFFER_SIZE]; /* transmit/recv buffer */
@@ -128,22 +122,21 @@ typedef struct _relay_instance
     int dns_listen_sk;       /* For dns live test */
     u_int16_t dns_listen_port;
     int dns_com_sk;
-    struct event sk_listen_ev;
-    struct event sk_read_ev;
+    struct event *sk_listen_ev;
+    struct event *sk_read_ev;
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
     u_int64_t n_qsamples;    /* queueing delay samples */
     u_int64_t qdelay_thresh; /* threhold of the queueing delay */
     u_int16_t amt_port;
     u_int8_t enable_queuing_delay_test;
-    u_int8_t enable_pcap_test;
-    u_int32_t pcap_buffer_size;
     int icmp_sk; /* For receiving ICMP messages */
-    struct event icmp_sk_ev;
+    struct event *icmp_sk_ev;
     struct idle_sgs idle_sgs_list;
     unsigned int cap_iface_index;        /* Interface index to capture the
                                             multicast packets */
     char cap_iface_name[16]; // IFNAMSIZ might be better here.
     struct sockaddr_storage tunnel_addr; /* IP address used in the tunnel */
+    struct event_base *event_base;
 } relay_instance;
 
 TAILQ_HEAD(instances, _relay_instance);
@@ -172,7 +165,7 @@ typedef struct _recv_if
 {
     relay_instance* rif_instance; /* instance */
     int rif_sock;                 /* socket */
-    struct event rif_ev;          /* libevent handle */
+    struct event *rif_ev;          /* libevent handle */
     patext rif_node;              /* patricia node, key must follow */
     prefix_t rif_pfx;             /* key: interface address prefix */
 } recv_if;
@@ -203,6 +196,7 @@ typedef struct _sgnode
     pat_handle sg_gwroot;           /* gw address patricia tree */
     u_int32_t sg_packets;           /* # packets forwarded */
     u_int32_t sg_bytes;             /* # bytes forwarded */
+    struct event *sg_receive_ev;       /* libevent handle */
 } sgnode;
 
 /*
@@ -229,7 +223,7 @@ typedef struct _gw_t
     u_int32_t gw_bytes;   /* # bytes forwarded */
     int gw_socket;        /* socket to send on */
     struct event
-          idle_timer; /* the gw is idle on this channel for some time */
+          *idle_timer; /* the gw is idle on this channel for some time */
 } gw_t;
 
 /*
@@ -257,9 +251,16 @@ typedef struct _packet
     u_int pkt_len;                 /* size of packet in buffer */
     int pkt_fd;                    /* socket packet received on */
     relay_instance* pkt_instance;  /* back pointer to instance */
+    u_int8_t pkt_ttl;
+    u_int8_t pkt_tos;
+    u_int16_t pkt_optlen;
+    uint8_t pkt_optbuf[40];         /* amt/udp/ip when forwarding data */
     prefix_t *pkt_src, *pkt_dst;   /* source and destination addr */
-    void* pkt_buffer;              /* where the packet is stored */
     u_int64_t enq_time; /* timestamp when this packet is enqueued */
+    u_int pkt_prequel_len;
+    uint8_t *pkt_prequel;
+    uint8_t *pkt_data;
+    uint8_t pkt_space[];
 } packet;
 
 typedef struct _url_request
@@ -295,8 +296,8 @@ void relay_accept_url(int, short, void*);
 void relay_sg_except_read(int, short, void*);
 int relay_socket_shared_init(int, struct sockaddr*, int);
 void relay_rif_free(recv_if*);
-int relay_pcap_create(relay_instance*);
-int relay_pcap_destroy(relay_instance*);
+void relay_socket_init(sgnode* sg);
+void relay_socket_read(int fd, short flags, void* uap);
 void relay_show_streams(relay_instance*, struct evbuffer*);
 void icmp_delete_gw(relay_instance* instance, prefix_t* pfx);
 

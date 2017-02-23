@@ -44,7 +44,6 @@ static const char __attribute__((unused)) id[] =
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
-#include <pcap.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,9 +216,9 @@ relay_icmp_init(relay_instance* instance)
         exit(1);
     }
 
-    event_set(&(instance->icmp_sk_ev), instance->icmp_sk,
-          EV_READ | EV_PERSIST, icmp_recv, instance);
-    if (event_add(&(instance->icmp_sk_ev), NULL)) {
+    instance->icmp_sk_ev = event_new(instance->event_base,
+            instance->icmp_sk, EV_READ | EV_PERSIST, icmp_recv, instance);
+    if (event_add(instance->icmp_sk_ev, NULL)) {
         fprintf(stderr, "ICMP socket event failed\n");
         exit(1);
     }
@@ -232,21 +231,11 @@ dns_reply(int fd, short __unused flags, void* uap)
     int nbytes;
     relay_instance* instance = (relay_instance*)uap;
     double avg_qdelay;
-    struct pcap_stat pstat;
-    u_int64_t pcap_lose = 0;
 
     if (instance->n_qsamples == 0)
         avg_qdelay = 0.0;
     else
         avg_qdelay = 1.0 * instance->agg_qdelay / instance->n_qsamples;
-
-    if (instance->n_qsamples > 0) {
-        if (pcap_stats(instance->relay_pcap, &pstat)) {
-            pcap_perror(instance->relay_pcap, "Cannot get pcap stats");
-        } else {
-            pcap_lose = pstat.ps_drop;
-        }
-    }
 
     if (relay_debug(instance)) {
         fprintf(stderr, "Send DNS response, avg delay: %f\n", avg_qdelay);
@@ -256,17 +245,14 @@ dns_reply(int fd, short __unused flags, void* uap)
 
     /* Ignore the data sent by the DNS,  send reponse directly */
     if (avg_qdelay >= instance->qdelay_thresh &&
-          instance->enable_queuing_delay_test)
+          instance->enable_queuing_delay_test) {
         sprintf(response, "HTTP/1.1 500 Internal Server "
                           "Error\r\nContent-Length:%u\r\n\r\n%f",
               (unsigned int)strlen(str_avg_qdelay), avg_qdelay);
-    else if (pcap_lose > 0 && instance->enable_pcap_test)
-        sprintf(response, "HTTP/1.1 500 Internal Server "
-                          "Error\r\nContent-Length:%u\r\n\r\n%f",
-              (unsigned int)strlen(str_avg_qdelay), avg_qdelay);
-    else
+    } else {
         sprintf(response, "HTTP/1.1 200 OK\r\nContent-Length:%u\r\n\r\n%f",
               (unsigned int)strlen(str_avg_qdelay), avg_qdelay);
+    }
 
     /* Set dns_com_sk to blocking mode */
     /* if(socket_set_blocking(instance->dns_com_sk)) {
@@ -323,9 +309,9 @@ dns_connect(int fd, short __unused flags, void* uap)
         return;
     }
 
-    event_set(&(instance->sk_read_ev), instance->dns_com_sk, EV_READ,
-          dns_reply, instance);
-    if (event_add(&(instance->sk_read_ev), NULL)) {
+    instance->sk_read_ev = event_new(instance->event_base,
+            instance->dns_com_sk, EV_READ, dns_reply, instance);
+    if (event_add(instance->sk_read_ev, NULL)) {
         if (relay_debug(instance)) {
             fprintf(stderr, "DNS com socket event failed: %s\n",
                   strerror(errno));
@@ -378,9 +364,10 @@ relay_dns_init(relay_instance* instance)
         exit(1);
     }
 
-    event_set(&(instance->sk_listen_ev), instance->dns_listen_sk,
-          EV_READ | EV_PERSIST, dns_connect, instance);
-    if (event_add(&(instance->sk_listen_ev), NULL)) {
+    instance->sk_listen_ev = event_new(instance->event_base,
+            instance->dns_listen_sk, EV_READ | EV_PERSIST, dns_connect,
+            instance);
+    if (event_add(instance->sk_listen_ev, NULL)) {
         fprintf(stderr, "DNS listen socket event failed\n");
         exit(1);
     }
@@ -390,6 +377,7 @@ static void
 relay_event_init(relay_instance* instance)
 {
     instance->relay_context = event_init();
+    instance->event_base = event_base_new();
     if (instance->relay_context == NULL) {
         fprintf(stderr, "event_init failed\n");
         exit(1);
@@ -400,7 +388,6 @@ static void
 relay_mcast_info(int signum)
 {
     relay_instance* instance;
-    struct pcap_stat relay_pcap_stat;
 
     instance = TAILQ_FIRST(&instance_head);
 
@@ -408,13 +395,6 @@ relay_mcast_info(int signum)
         fprintf(stderr, "mcast data recvd: %llu, mcast data sent: %llu\n",
               (unsigned long long)instance->stats.mcast_data_recvd,
               (unsigned long long)instance->stats.mcast_data_sent);
-        pcap_stats(instance->relay_pcap, &relay_pcap_stat);
-        fprintf(stderr, "pcap data recvd: %u, pcap data dropped: %u\n",
-              relay_pcap_stat.ps_recv, relay_pcap_stat.ps_drop);
-        fprintf(stderr, "pcap data recvd by relay 1: %llu\n",
-              (unsigned long long)instance->stats.pcap_data_recvd1);
-        fprintf(stderr, "pcap data recvd by relay 2: %llu\n",
-              (unsigned long long)instance->stats.pcap_data_recvd2);
     }
 
     exit(0);
@@ -447,8 +427,7 @@ usage(char* name)
                     "threshold (default 100 msec)] [-g DNS live test "
                     "listening port (default 80)] [-b AMT port (default "
                     "2268)] [--enable-queuing-delay-test enable the DNS "
-                    "live test for queuing delay] [--enable-pcap-test "
-                    "enable the DNS live test for pcap lost pkts]\n",
+                    "live test for queuing delay]\n",
           name);
     exit(1);
 }
@@ -477,11 +456,18 @@ relay_socket_shared_init(int family,
     if (bind_addr) {
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
-            fprintf(stderr, "error binding socket (%s/%u): %s\n",
+            fprintf(stderr, "error binding socket (%s :%u/%u): %s\n",
                     inet_ntop(family, &bind_addr, str, sizeof(str)),
+                    htons(((struct sockaddr_in*)bind_addr)->sin_port),
                     bind_addr_len, strerror(errno));
             exit(1);
         }
+        /*
+        fprintf(stderr, "bound udp socket (%s :%u/%u): %s\n",
+                    inet_ntop(family, &bind_addr, str, sizeof(str)),
+                    htons(((struct sockaddr_in*)bind_addr)->sin_port),
+                    bind_addr_len, strerror(errno));
+        */
     }
 
 /*
@@ -599,9 +585,9 @@ relay_url_init(relay_instance* instance)
         exit(1);
     }
 
-    event_set(&instance->relay_url_ev, sock, EV_READ | EV_PERSIST,
-          relay_accept_url, (void*)instance);
-    rc = event_add(&instance->relay_url_ev, NULL);
+    instance->relay_url_ev = event_new(instance->event_base, sock,
+            EV_READ | EV_PERSIST, relay_accept_url, (void*)instance);
+    rc = event_add(instance->relay_url_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error url event_add: %s\n", strerror(errno));
         exit(1);
@@ -619,9 +605,10 @@ relay_anycast_socket_init(relay_instance* instance,
     instance->relay_anycast_sock = relay_socket_shared_init(
           instance->relay_af, listen_addr, addr_len);
 
-    event_set(&instance->relay_anycast_ev, instance->relay_anycast_sock,
-          EV_READ | EV_PERSIST, relay_instance_read, (void*)instance);
-    rc = event_add(&instance->relay_anycast_ev, NULL);
+    instance->relay_anycast_ev = event_new(instance->event_base,
+            instance->relay_anycast_sock, EV_READ | EV_PERSIST,
+            relay_instance_read, (void*)instance);
+    rc = event_add(instance->relay_anycast_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error anycast event_add: %s\n", strerror(errno));
         exit(1);
@@ -638,8 +625,7 @@ main(int argc, char** argv)
     struct sockaddr_in addr;
     struct sockaddr_in6 addr6;
     struct option long_options[] = { { "enable-queuing-delay-test",
-                                           no_argument, 0, 'e' },
-        { "enable-pcap-test", no_argument, 0, 'f' } };
+                                           no_argument, 0, 'e' } };
 
     /*
      * assume IPv4 for the first release.
@@ -654,8 +640,6 @@ main(int argc, char** argv)
     instance->dns_listen_port = 80;
     instance->amt_port = AMT_PORT;
     instance->enable_queuing_delay_test = 0;
-    instance->enable_pcap_test = 0;
-    instance->pcap_buffer_size = 10 * 1024 * 1024;
 
     bzero((char*)&listen_addr, sizeof(listen_addr));
 #ifdef BSD
@@ -664,7 +648,7 @@ main(int argc, char** argv)
     plen = 0;
     tunnel_addr[0] = '\0';
 
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:r:n:c:l:s:",
+    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:",
                   long_options, NULL)) != EOF) {
         switch (ch) {
             case 's': {
@@ -809,17 +793,6 @@ main(int argc, char** argv)
             case 'e':
                 instance->enable_queuing_delay_test = 1;
                 break;
-            case 'f':
-                instance->enable_pcap_test = 1;
-                break;
-            case 'r':
-                instance->pcap_buffer_size = atoi(optarg);
-                if (instance->pcap_buffer_size < 64 * 1024) {
-                    fprintf(stderr,
-                          "pcap buffer size should be bigger than 64KB\n");
-                    exit(1);
-                }
-                break;
             case 'p':
                 if (optarg == NULL) {
                     fprintf(stderr, "must specify port number\n");
@@ -888,8 +861,8 @@ main(int argc, char** argv)
     relay_dns_init(instance);
     relay_icmp_init(instance);
 
-    rc = event_dispatch();
-    fprintf(stderr, "Unexpected exit: %s\n", strerror(rc));
+    rc = event_base_dispatch(instance->event_base);
+    fprintf(stderr, "failure calling event_dispatch: %s\n", strerror(rc));
 
     return rc;
 }

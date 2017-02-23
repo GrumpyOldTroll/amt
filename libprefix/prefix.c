@@ -41,6 +41,7 @@ static const char __attribute__((unused)) id[] =
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/types.h>

@@ -51,6 +51,7 @@ static const char __attribute__((unused)) id[] =
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #ifdef BSD
 #include <net/if_dl.h>
 #endif /* BSD */
@@ -63,7 +64,6 @@ static const char __attribute__((unused)) id[] =
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/udp.h>
-#include <pcap.h>
 
 #include <event.h>
 
@@ -118,11 +118,12 @@ relay_pkt_get(relay_instance* instance)
     packet* pkt;
 
     if (!mem_packet_handle) {
-        mem_packet_handle = mem_type_init(sizeof(packet), "Relay Packet");
+        mem_packet_handle = mem_type_init(sizeof(packet) + BUFFER_SIZE,
+                "Relay Packet");
     }
     pkt = (packet*)mem_type_alloc(mem_packet_handle);
-    pkt->pkt_buffer = malloc(BUFFER_SIZE);
     pkt->pkt_instance = instance;
+    pkt->pkt_data = &pkt->pkt_space[0];
 
     return pkt;
 }
@@ -138,8 +139,6 @@ relay_pkt_free(packet* pkt)
     if (TAILQ_LINKED(pkt, pkt_next)) {
         TAILQ_REMOVE(&instance->pkt_head[pkt->pkt_queue], pkt, pkt_next);
     }
-
-    free(pkt->pkt_buffer);
 
     mem_type_free(mem_packet_handle, pkt);
 }
@@ -307,7 +306,7 @@ igmp_decode(relay_instance* instance,
     u_int8_t* cp;
     u_int32_t mc_addr;
 
-    cp = (u_int8_t*)pkt->pkt_buffer;
+    cp = (u_int8_t*)pkt->pkt_data;
     pktlen = pkt->pkt_len;
     cp++; /* type */
     pktlen--;
@@ -503,7 +502,7 @@ mld_decode(relay_instance* instance,
     pktlen = pkt->pkt_len;
 
     /* skip AMT headers */
-    cp = pkt->pkt_buffer;
+    cp = pkt->pkt_data;
     cp++;
     pktlen--; /* Skip type */
     cp++;
@@ -603,7 +602,7 @@ relay_discovery_nonce_extract(packet* pkt)
     u_int32_t nonce;
 
     len = pkt->pkt_len;
-    cp = (u_int8_t*)pkt->pkt_buffer;
+    cp = (u_int8_t*)pkt->pkt_data;
 
     if (len > sizeof(u_int32_t)) {
         cp += sizeof(u_int32_t);
@@ -635,7 +634,7 @@ relay_gw_nonce_extract(packet* pkt)
     u_int32_t nonce;
 
     len = pkt->pkt_len;
-    cp = (u_int8_t*)pkt->pkt_buffer;
+    cp = (u_int8_t*)pkt->pkt_data;
 
     if (len > sizeof(u_int32_t)) {
         cp += sizeof(u_int32_t);
@@ -690,7 +689,7 @@ relay_response_mac_verify(packet* pkt)
 
     instance = pkt->pkt_instance;
 
-    cp = (u_int8_t*)pkt->pkt_buffer;
+    cp = (u_int8_t*)pkt->pkt_data;
     cp++; /* type */
     cp++; /* reserved */
     mac = cp;
@@ -725,6 +724,11 @@ relay_select_src_addr(relay_instance* instance,
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
     struct sockaddr* sa = NULL;
+
+    // XXX: Allow a configurable override. This is necessary when we
+    // are behind a nat, though using the routing table via connect to
+    // automate a lookup is a cute trick. -Jake
+    // (this function is only for replying to discovery)
 
     switch (dst->family) {
         case AF_INET:
@@ -842,9 +846,9 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
     rif->rif_sock =
           relay_socket_shared_init(instance->relay_af, src_sa, srclen);
 
-    event_set(&rif->rif_ev, rif->rif_sock, EV_READ | EV_PERSIST,
-          relay_instance_read, (void*)instance);
-    rc = event_add(&rif->rif_ev, NULL);
+    rif->rif_ev = event_new(instance->event_base, rif->rif_sock,
+            EV_READ | EV_PERSIST, relay_instance_read, (void*)instance);
+    rc = event_add(rif->rif_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "error rif event_add: %s\n", strerror(errno));
         exit(1);
@@ -1011,9 +1015,9 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             igmpq->nsrcs = 0;
             igmpq->srcs[0] = 0;
             igmpq->csum = csum((unsigned short*)igmpq,
-                  (sizeof(struct igmpv3_query)) >> 1);
+                               sizeof(struct igmpv3_query) / 2);
             iph->ip_sum = csum((unsigned short*)iph,
-                  (sizeof(struct ip) + sizeof(struct igmpv3_query)) >> 1);
+                               sizeof(struct ip) / 2);
             len = sizeof(struct ip) + sizeof(struct igmpv3_query);
             break;
         }
@@ -1307,8 +1311,7 @@ relay_packet_deq(int fd, short event, void* uap)
                                     membership_tree_refresh(instance, mt,
                                           pkt, group, NULL, from);
                                 } else {
-                                    while (
-                                          !TAILQ_EMPTY(&tmprec->src_head)) {
+                                    while (!TAILQ_EMPTY(&tmprec->src_head)) {
                                         tmpsrc = TAILQ_FIRST(
                                               &tmprec->src_head);
                                         source = tmpsrc->source;
@@ -1333,37 +1336,16 @@ relay_packet_deq(int fd, short event, void* uap)
                     if (relay_debug(instance)) {
                         static unsigned int data_pkts_recvd = 0;
                         if (data_pkts_recvd % 10000 == 0) {
-                            fprintf(stderr, "Received %s data packet %u, "
-                                            "len %d from %s",
-                                  (pkt->pkt_af == AF_INET) ? "INET"
-                                                           : "INET6",
-                                  data_pkts_recvd, pkt->pkt_len,
-                                  prefix2str(
-                                        pkt->pkt_src, str, sizeof(str)));
-                            /*
                             fprintf(stderr,
-                                    "Received %s data packet len %d from
-                            %s",
-                                    (pkt->pkt_af == AF_INET) ? "INET" :
-                            "INET6",
-                                    pkt->pkt_len,
-                                    prefix2str(pkt->pkt_src, str,
-                            sizeof(str)));
-                            */
-                            if (pkt->pkt_sport) {
-                                fprintf(stderr, ":%u ",
-                                      ntohs(pkt->pkt_sport));
-                            } else {
-                                fprintf(stderr, " ");
-                            }
-                            fprintf(stderr, "to %s",
-                                  prefix2str(
-                                        pkt->pkt_dst, str2, sizeof(str2)));
-                            if (pkt->pkt_dport) {
-                                fprintf(
-                                      stderr, ":%u", ntohs(pkt->pkt_dport));
-                            }
-                            fprintf(stderr, "\n");
+                                "Received %s data packet %u, len %d "
+                                "from %s:%u to %s:%u\n",
+                                (pkt->pkt_af == AF_INET) ? "INET":"INET6",
+                                data_pkts_recvd,
+                                pkt->pkt_len,
+                                prefix2str(pkt->pkt_src, str, sizeof(str)),
+                                ntohs(pkt->pkt_sport),
+                                prefix2str(pkt->pkt_dst, str2, sizeof(str2)),
+                                ntohs(pkt->pkt_dport));
                         }
                         data_pkts_recvd++;
                     }
@@ -1400,14 +1382,14 @@ relay_packet_deq(int fd, short event, void* uap)
         }
     }
     if (finished) {
-        evtimer_del(&instance->relay_pkt_timer);
+        evtimer_del(instance->relay_pkt_timer);
     } else {
         int rc;
         struct timeval tv;
 
         timerclear(&tv);
         tv.tv_usec = AMT_PACKET_Q_USEC;
-        rc = evtimer_add(&instance->relay_pkt_timer, &tv);
+        rc = evtimer_add(instance->relay_pkt_timer, &tv);
         if (rc < 0) {
             fprintf(stderr, "can't re-initialize packet timer: %s\n",
                   strerror(errno));
@@ -1458,15 +1440,19 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
      * Make sure the input queue timer is running so the queue will
      * get drained.
      */
+    if (!instance->relay_pkt_timer) {
+        instance->relay_pkt_timer = evtimer_new(instance->event_base,
+                relay_packet_deq, instance);
+    }
 
-    if (!evtimer_pending(&instance->relay_pkt_timer, NULL)) {
+    if (!evtimer_pending(instance->relay_pkt_timer, NULL)) {
         int rc;
         struct timeval tv;
 
         timerclear(&tv);
         tv.tv_usec = AMT_PACKET_Q_USEC;
-        evtimer_set(&instance->relay_pkt_timer, relay_packet_deq, instance);
-        rc = evtimer_add(&instance->relay_pkt_timer, &tv);
+        // evtimer_set(instance->relay_pkt_timer, relay_packet_deq, instance);
+        rc = evtimer_add(instance->relay_pkt_timer, &tv);
         if (rc < 0) {
             fprintf(stderr, "can't initialize packet timer: %s\n",
                   strerror(errno));
@@ -1476,7 +1462,7 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
 }
 
 static int
-relay_message_read(relay_instance* instance, int fd)
+relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
 {
     u_int8_t namebuf[NAMELEN];
     u_int8_t ctlbuf[CTLLEN];
@@ -1485,10 +1471,8 @@ relay_message_read(relay_instance* instance, int fd)
     struct sockaddr* srcsock;
     struct sockaddr_in* in;
     struct sockaddr_in6* in6;
-    int ctl_left, len, rc;
-    u_int8_t *ctlptr, *cp;
-    struct cmsghdr* cmsgptr;
-    packet* pkt;
+    int len, rc;
+    struct cmsghdr* cmsgp;
 
     bzero(&iovec, sizeof(iovec));
     bzero(&msghdr, sizeof(msghdr));
@@ -1500,10 +1484,8 @@ relay_message_read(relay_instance* instance, int fd)
     msghdr.msg_control = ctlbuf;
     msghdr.msg_controllen = CTLLEN;
 
-    pkt = relay_pkt_get(instance);
-
-    iovec.iov_base = pkt->pkt_buffer;
-    iovec.iov_len = BUFFER_SIZE;
+    iovec.iov_base = &pkt->pkt_data[offset];
+    iovec.iov_len = BUFFER_SIZE - offset;
 
     rc = recvmsg(fd, &msghdr, 0);
     if (rc < 0) {
@@ -1518,12 +1500,12 @@ relay_message_read(relay_instance* instance, int fd)
                 break;
 
             case EWOULDBLOCK: /* Nothing to read. */
-                goto fail;
+                return rc;
 
             default:
                 fprintf(stderr, "Error on read, family %u: %s",
-                      instance->relay_af, strerror(errno));
-                goto fail;
+                      af_family, strerror(errno));
+                return rc;
         }
     }
 
@@ -1532,18 +1514,18 @@ relay_message_read(relay_instance* instance, int fd)
     if (msghdr.msg_flags & MSG_TRUNC) {
         fprintf(stderr, "received packet truncated, buffer size %d too "
                         "small, address family %d, flags 0x%x\n",
-              BUFFER_SIZE, instance->relay_af, msghdr.msg_flags);
-        goto fail;
+              BUFFER_SIZE, af_family, msghdr.msg_flags);
+        return rc;
     }
 
     if (msghdr.msg_flags & MSG_CTRUNC) {
         fprintf(stderr, "packet control info truncated, buffer size %d too "
                         "small, address family %d, flags 0x%x\n",
-              CTLLEN, instance->relay_af, msghdr.msg_flags);
-        goto fail;
+              CTLLEN, af_family, msghdr.msg_flags);
+        return rc;
     }
 
-    pkt->pkt_len = rc;
+    pkt->pkt_len = rc + offset;
     pkt->pkt_fd = fd;
 
     /*
@@ -1553,133 +1535,138 @@ relay_message_read(relay_instance* instance, int fd)
     assert(srcsock);
     pkt->pkt_af = srcsock->sa_family;
     switch (pkt->pkt_af) {
-        case AF_INET:
-            in = (struct sockaddr_in*)srcsock;
-            len = msghdr.msg_namelen;
-            if (len < MIN_SOCKADDR_IN_LEN) {
-                goto fail;
-            }
+    case AF_INET:
+    {
+        in = (struct sockaddr_in*)srcsock;
+        len = msghdr.msg_namelen;
+        if (len < MIN_SOCKADDR_IN_LEN) {
+            return rc;
+        }
 #ifdef BSD
-            if (in->sin_len < MIN_SOCKADDR_IN_LEN) {
-                goto fail;
-            }
+        if (in->sin_len < MIN_SOCKADDR_IN_LEN) {
+            return rc;
+        }
 #endif
-            pkt->pkt_src = prefix_build(
-                  AF_INET, &in->sin_addr.s_addr, INET_HOST_LEN);
-            pkt->pkt_sport = in->sin_port;
+        pkt->pkt_src = prefix_build(
+              AF_INET, &in->sin_addr.s_addr, INET_HOST_LEN);
+        pkt->pkt_sport = in->sin_port;
 
-            /*
-             * Get the incoming interface index for filter comparisons.
-             * Get the destination IP address to find anycast packets.
-             */
-            ctlptr = ctlbuf;
-            ctl_left = msghdr.msg_controllen;
-            while (ctl_left > (int)sizeof(struct cmsghdr)) {
-                cmsgptr = (struct cmsghdr*)ctlptr;
-#ifdef BSD
-                if (cmsgptr->cmsg_level == IPPROTO_IP &&
-                      cmsgptr->cmsg_type == IP_RECVIF &&
-                      cmsgptr->cmsg_len >=
-                            offsetof(struct sockaddr_dl, sdl_data[0])) {
-
-                    dl_addr = (struct sockaddr_dl*)(ctlptr +
-                                                    sizeof(struct cmsghdr));
+        /*
+         * Get the incoming interface index for filter comparisons.
+         * Get the destination IP address to find anycast packets.
+         */
+        cmsgp = CMSG_FIRSTHDR(&msghdr);
+        while (cmsgp) {
+            // does it have to be SOL_IP on linux, or is IPPROTO_IP the same?
+            if (cmsgp->cmsg_level == IPPROTO_IP) {
+                switch (cmsgp->cmsg_type) {
+#if BSD
+                case IP_RECVIF:
+                    dl_addr = (struct sockaddr_dl*)CMSG_DATA(cmsgp);
                     pkt->pkt_ifindex = dl_addr->sdl_index;
-                } else if (cmsgptr->cmsg_level == IPPROTO_IP &&
-                           cmsgptr->cmsg_type == IP_RECVDSTADDR &&
-                           cmsgptr->cmsg_len >= sizeof(struct in_addr)) {
-
+                break;
+                case IP_RECVDSTADDR:
+                    assert(cmsgp->cmsg_len >= sizeof(struct in_addr));
                     pkt->pkt_dst = prefix_build(
-                          AF_INET, CMSG_DATA(cmsgptr), INET_HOST_LEN);
-                }
-#else
-                if (cmsgptr->cmsg_level == SOL_IP &&
-                      cmsgptr->cmsg_type == IP_PKTINFO) {
+                          AF_INET, CMSG_DATA(cmsgp), INET_HOST_LEN);
+                break;
+#else  // BSD
+                case IP_PKTINFO:
+                {
                     struct in_pktinfo* pktinfo =
-                          (struct in_pktinfo*)CMSG_DATA(cmsgptr);
+                        (struct in_pktinfo*)CMSG_DATA(cmsgp);
                     struct in_addr s_addr = pktinfo->ipi_spec_dst;
                     pkt->pkt_dst =
                           prefix_build(AF_INET, &s_addr, INET_HOST_LEN);
                     pkt->pkt_ifindex = pktinfo->ipi_ifindex;
                 }
-#endif
-                ctl_left -= cmsgptr->cmsg_len;
-                ctlptr += cmsgptr->cmsg_len;
+                break;
+#endif  // BSD
+                case IP_OPTIONS:
+                    // with IP_RECVOPTS
+                    assert(cmsgp->cmsg_len <= sizeof(pkt->pkt_optbuf));
+                    pkt->pkt_optlen = cmsgp->cmsg_len;
+                    bcopy(CMSG_DATA(cmsgp), &pkt->pkt_optbuf[0],
+                            cmsgp->cmsg_len);
+                break;
+                case IP_TOS:
+                    // with IP_RECVTOS
+                    // do I fwd this or should I force it to my own?
+                    assert(cmsgp->cmsg_len == 1);
+                    pkt->pkt_tos = *(u_int8_t*)CMSG_DATA(cmsgp);
+                break;
+                case IP_TTL:
+                case IP_RECVTTL:
+                // http://man7.org/linux/man-pages/man7/ip.7.html
+                    // with IP_RECVTTL
+                    // do I fwd this or should I force it to my own?
+                    assert(cmsgp->cmsg_len == 1);
+                    pkt->pkt_ttl = *(u_int8_t*)CMSG_DATA(cmsgp);
+                break;
+                default:
+                    fprintf(stderr, "ignored cmsg_type=%d\n", cmsgp->cmsg_type);
+                }
             }
-            break;
-
-        case AF_INET6: {
-            in6 = (struct sockaddr_in6*)srcsock;
-            len = msghdr.msg_namelen;
-            if (len < sizeof(*in6))
-                goto fail;
-
-            pkt->pkt_src = prefix_build(
-                  AF_INET6, in6->sin6_addr.s6_addr, INET6_HOST_LEN);
-            pkt->pkt_sport = in6->sin6_port;
-
             /*
+            // please god tell me the above is nearly portable now...
+#ifdef BSD
+#else  // BSD
+            if (cmsgp->cmsg_level == IPPROTO_IP) {
+                switch (cmsgp->cmsg_type) {
+                default:
+                    fprintf(stderr, "ignored ncmsg_type=%d\n", cmsgp->cmsg_type);
+                }
+            }
+#endif  // BSD
+*/
+            cmsgp = CMSG_NXTHDR(&msghdr, cmsgp);
+        }
+    }
+    break;
+
+    case AF_INET6: {
+        in6 = (struct sockaddr_in6*)srcsock;
+        len = msghdr.msg_namelen;
+        if (len < sizeof(*in6)) {
+            return rc;
+        }
+
+        pkt->pkt_src = prefix_build(
+              AF_INET6, in6->sin6_addr.s6_addr, INET6_HOST_LEN);
+        pkt->pkt_sport = in6->sin6_port;
+
+        /*
          * Get the incoming interface index for filter comparisons.
          * Get the destination IP address to find anycast packets.
          */
-            ctlptr = ctlbuf;
-            ctl_left = msghdr.msg_controllen;
-            while (ctl_left > (int)sizeof(struct cmsghdr)) {
-                cmsgptr = (struct cmsghdr*)ctlptr;
-                if (cmsgptr->cmsg_level == SOL_IPV6 &&
-                      cmsgptr->cmsg_type == IPV6_PKTINFO) {
+        // XXX: IPv6 options, etc. for data forwarding! -Jake
+        cmsgp = CMSG_FIRSTHDR(&msghdr);
+        while (cmsgp) {
+            if (cmsgp->cmsg_level == SOL_IPV6) {
+                switch (cmsgp->cmsg_type) {
+                case IPV6_PKTINFO:
+                {
                     struct in6_pktinfo* pktinfo = 
-                          (struct in6_pktinfo*)CMSG_DATA(cmsgptr);
+                          (struct in6_pktinfo*)CMSG_DATA(cmsgp);
                     struct in6_addr s_addr = pktinfo->ipi6_addr;
                     pkt->pkt_dst = prefix_build(
                           AF_INET6, s_addr.s6_addr, INET6_HOST_LEN);
                     pkt->pkt_ifindex = pktinfo->ipi6_ifindex;
                 }
-                ctl_left -= cmsgptr->cmsg_len;
-                ctlptr += cmsgptr->cmsg_len;
+                break;
+                default:
+                    fprintf(stderr, "ignored ncmsg_type=%d\n", cmsgp->cmsg_type);
+                }
             }
-
-            break;
+            cmsgp = CMSG_NXTHDR(&msghdr, cmsgp);
         }
+    }
+    break;
 
-        default:
-            assert(pkt->pkt_af == AF_INET || pkt->pkt_af == AF_INET6);
+    default:
+        assert(pkt->pkt_af == AF_INET || pkt->pkt_af == AF_INET6);
     }
 
-    /*
-     * Figure out the type of packet and use this later for queueing
-     */
-    cp = pkt->pkt_buffer;
-
-    switch (*cp) {
-        case AMT_RELAY_DISCOVERY:
-        case AMT_REQUEST:
-        case AMT_MEMBERSHIP_CHANGE:
-            pkt->pkt_dport = htons(instance->amt_port);
-        /* fall through */
-
-        case AMT_RELAY_ADVERTISEMENT:
-        case AMT_MEMBERSHIP_QUERY:
-            pkt->pkt_amt = *cp;
-            relay_packet_enq(instance, pkt);
-            break;
-
-        case AMT_MCAST_DATA:
-            /* data from gateway not yet supported */
-            fprintf(stderr,
-                  "received data from AMT gateway, not supported\n");
-            break;
-
-        default:
-            fprintf(stderr, "received unknown AMT type, %d\n", *cp);
-            rc = 0;
-    }
-
-fail:
-
-    if (rc <= 0) {
-        relay_pkt_free(pkt);
-    }
     return rc;
 }
 
@@ -1692,7 +1679,40 @@ relay_instance_read(int fd, short __unused flags, void* uap)
     instance = (relay_instance*)uap;
 
     do {
-        len = relay_message_read(instance, fd);
+        packet* pkt = relay_pkt_get(instance);
+        len = relay_packet_read(fd, instance->relay_af, pkt, 0);
+        if (len <= 0) {
+            relay_pkt_free(pkt);
+            break;
+        }
+
+        uint8_t* cp = pkt->pkt_data;
+
+        switch (*cp) {
+            case AMT_RELAY_DISCOVERY:
+            case AMT_REQUEST:
+            case AMT_MEMBERSHIP_CHANGE:
+                pkt->pkt_dport = htons(instance->amt_port);
+            /* fall through */
+
+            case AMT_RELAY_ADVERTISEMENT:
+            case AMT_MEMBERSHIP_QUERY:
+                pkt->pkt_amt = *cp;
+                relay_packet_enq(instance, pkt);
+                break;
+
+            case AMT_MCAST_DATA:
+                /* data from gateway not yet supported */
+                fprintf(stderr,
+                      "received data from AMT gateway, not supported\n");
+                relay_pkt_free(pkt);
+                break;
+
+            default:
+                fprintf(stderr, "received unknown AMT type, %u\n", *cp);
+                relay_pkt_free(pkt);
+                len = 0;
+        }
     } while (len > 0);
 }
 
@@ -1959,400 +1979,162 @@ print_pat(patext* pat)
 */
 
 void
-relay_pcap_read(u_char* uap,
-      const struct pcap_pkthdr* pkthdr,
-      const u_int8_t* cp)
+relay_socket_init(sgnode* sg)
 {
-    int len;
-    packet* pkt;
-    relay_instance* instance;
-    struct ether_header* ether;
-    struct ip* ip;
-    struct ip6_hdr* ip6;
-    u_int8_t* ap;
-    prefix_t* pfx;
-    patext* pat;
-    int enq = 0;
-    char src[MAX_ADDR_STRLEN], dst[MAX_ADDR_STRLEN];
-
-    ip = NULL;
-    instance = (relay_instance*)uap;
-
-    instance->stats.pcap_data_recvd1++;
-
-    /*
-    if (relay_debug(instance)) {
-        fprintf(stderr, "got dispatch callback, caplen %u, pktlen %u\n",
-              pkthdr->caplen, pkthdr->len);
+    // XXX: actually maybe I do. I think this needs to be on a shared
+    // refcounted group object, not on a specific sg. Make sure to fix that,
+    // else I think joining s1,g1 and s2,g1 will dup packets?
+    relay_instance* instance = sg->sg_instance;
+    int family = instance->tunnel_af;
+    char str[MAX_ADDR_STRLEN];
+    struct sockaddr_storage gaddr_buf;
+    struct sockaddr* gaddr = (struct sockaddr*)&gaddr_buf;
+    // ((struct sockaddr_in*)gaddr)->sin_port = htons(5001);
+    int gaddr_len = prefix2sock(sg->sg_group, gaddr);
+    int trueval = 1;
+    int sock;
+    int rc;
+    sock = socket(family, SOCK_RAW, IPPROTO_UDP);
+    fprintf(stderr, "created data socket: %d, binding %s\n", sock,
+            inet_ntop(family, gaddr, str, sizeof(str)));
+    if (sock < 0) {
+        fprintf(stderr, "error creating data socket: %s\n",
+                strerror(errno));
+        exit(1);
     }
-    */
-    if (pkthdr->caplen != pkthdr->len) {
-        if (relay_debug(instance))
-            fprintf(stderr, "Received short packet over pcap %u of %u\n",
-                  pkthdr->caplen, pkthdr->len);
-        return;
+    rc = bind(sock, gaddr, gaddr_len);
+    if (rc < 0) {
+        fprintf(stderr, "error binding data socket: (%s) %s\n",
+                inet_ntop(family, gaddr, str, sizeof(str)),
+                strerror(errno));
+        exit(1);
     }
-    len = pkthdr->len;
-
-    switch (instance->relay_datalink) {
-        case DLT_NULL:
-            cp += 4;
-            len -= 4;
-            break;
-
-        case DLT_EN10MB:
-            ether = (struct ether_header*)cp;
-            if (ntohs(ether->ether_type) != ETHERTYPE_IP) {
-                if (relay_debug(instance))
-                    fprintf(stderr, "Wrong Ethernet type %d\n",
-                          ntohs(ether->ether_type));
-                return;
-            }
-            cp += 14;
-            len -= 14;
-            break;
-
-        case DLT_SLIP:
-        case DLT_PPP:
-            cp += 24;
-            len -= 24;
-            break;
-        case DLT_LINUX_SLL:
-            cp += 16;
-            len -= 16;
-            break;
-        default:
-            if (relay_debug(instance))
-                fprintf(stderr, "pcap receive, unknown datalink type %d\n",
-                      instance->relay_datalink);
-            return;
+#ifdef BSD
+    rc = setsockopt(sock, IPPROTO_IP, IP_RECVDSTADDR, &trueval, len);
+    if (rc < 0) {
+        fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
+              strerror(errno));
+        exit(1);
     }
-
-    if (len == 0) {
-        if (relay_debug(instance))
-            fprintf(stderr, "AMT DATA packet too small\n");
-        return;
+    rc = setsockopt(sock, IPPROTO_IP, IP_RECVIF, &trueval, len);
+    if (rc < 0) {
+        fprintf(stderr, "error IP_RECVIF on socket: %s\n", strerror(errno));
+        exit(1);
     }
-    if (len > BUFFER_SIZE) {
-        if (relay_debug(instance))
-            fprintf(stderr, "AMT DATA packet too big\n");
-        return;
-    }
-
-    /*
-    if (relay_debug(instance)) {
-        printf("%02x%02x%02x%02x %02x%02x%02x%02x "
-               "%02x%02x%02x%02x %02x%02x%02x%02x\n"
-               "%02x%02x%02x%02x %02x%02x%02x%02x "
-               "%02x%02x%02x%02x %02x%02x%02x%02x\n",
-               cp[0],cp[1],cp[2],cp[3],cp[4],cp[5],cp[6],cp[7],
-               cp[8],cp[9],cp[10],cp[11],cp[12],cp[13],cp[14],cp[15],
-               cp[16],cp[17],cp[18],cp[19],cp[20],cp[21],cp[22],cp[23],
-               cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31]);
-    }
-    */
-
-    pkt = relay_pkt_get(instance);
-    pkt->pkt_af = instance->tunnel_af;
-    // pkt->pkt_af = instance->relay_af;
-    pkt->pkt_amt = AMT_MCAST_DATA;
-
-    /*
-     * leave space for the AMT header at the beginning of the packet
-     */
-    ap = pkt->pkt_buffer;
-    *ap++ = AMT_MCAST_DATA;
-    *ap++ = 0; /* reserved */
-
-    /* Draft-07 changes */
-    bcopy(cp, ap, len);
-
-    len += sizeof(u_int16_t);
-
-    pkt->pkt_len = len;
-
-    switch (instance->tunnel_af) {
-        case AF_INET:
-            ip = (struct ip*)cp;
-            if (ip->ip_ttl == 1) {
-                if (relay_debug(instance))
-                    fprintf(stderr, "IP packet with ttl 1\n");
-                relay_pkt_free(pkt);
-                return;
-            }
-            pkt->pkt_src =
-                  prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
-            pkt->pkt_dst =
-                  prefix_build(AF_INET, &ip->ip_dst.s_addr, INET_HOST_LEN);
-            break;
-
-        case AF_INET6:
-            ip6 = (struct ip6_hdr*)cp;
-            if (ip6->ip6_hops == 1) {
-                if (relay_debug(instance))
-                    fprintf(stderr, "IP6 packet with ttl 1\n");
-                relay_pkt_free(pkt);
-                return;
-            }
-            pkt->pkt_src = prefix_build(
-                  AF_INET6, ip6->ip6_src.s6_addr, INET6_HOST_LEN);
-            pkt->pkt_dst = prefix_build(
-                  AF_INET6, ip6->ip6_dst.s6_addr, INET6_HOST_LEN);
-            break;
-        default:
-            if (relay_debug(instance))
-                fprintf(stderr, "Unknown IP version\n");
-            relay_pkt_free(pkt);
-            return;
-    }
-
-    /* count the number of pcap packets */
-    instance->stats.pcap_data_recvd2++;
-
-    /* enqueue only needed pkts */
-    pfx = prefix_dup(pkt->pkt_dst);
-    pat = pat_get(
-          &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
-    if (pat) {
-        enq = 1;
-    } else {
-        pfx = prefix_build_mcast(pkt->pkt_dst, pkt->pkt_src);
-        pat = pat_get(
-              &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
-        if (pat)
-            enq = 1;
-    }
-
-    if (enq == 1) {
-        /*
-        if (relay_debug(instance)) {
-            fprintf(stderr, "pkt queued: %s -> %s\n",
-                  prefix2str(pkt->pkt_src, src, MAX_ADDR_STRLEN),
-                  prefix2str(pkt->pkt_dst, dst, MAX_ADDR_STRLEN));
+#else
+    if (family == AF_INET) {
+        rc = setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &trueval,
+                sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
+                  strerror(errno));
+            exit(1);
         }
-        */
-        relay_packet_enq(instance, pkt);
     } else {
-        if (relay_debug(instance))
-            fprintf(stderr, "pkt not subscribed: %s -> %s\n",
-                  prefix2str(pkt->pkt_src, src, MAX_ADDR_STRLEN),
-                  prefix2str(pkt->pkt_dst, dst, MAX_ADDR_STRLEN));
-        relay_pkt_free(pkt);
+        rc = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &trueval,
+                sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IPv6_RECVDSTADDR on socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+    }
+#endif
+
+    rc = fcntl(sock, F_GETFL, 0);
+    if (rc < 0) {
+        fprintf(stderr, "error in GETFL: %s\n", strerror(errno));
+        exit(1);
+    }
+    rc = fcntl(sock, F_SETFL, rc | O_NONBLOCK);
+    if (rc < 0) {
+        fprintf(
+              stderr, "error O_NONBLOCK on socket: %s\n", strerror(errno));
+        exit(1);
+    }
+    sg->sg_socket = sock;
+
+    sg->sg_receive_ev = event_new(instance->event_base, sg->sg_socket,
+          EV_READ | EV_PERSIST, relay_socket_read, (void*)instance);
+    rc = event_add(sg->sg_receive_ev, NULL);
+    if (rc < 0) {
+        fprintf(stderr, "error relay socket event_add: %s\n", strerror(errno));
+        exit(1);
     }
 
-    prefix_free(pfx);
-#define BLOCKING_DISPATCH 1
+    /*
+    int sockopt_true = TRUE;
+    if (instance->tunnel_af == AF_INET) {
+        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_RECVOPTS,
+              &sockopt_true, sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVOPTS sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_RECVTOS,
+              &sockopt_true, sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVTOS sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+        rc = setsockopt(sg->sg_socket, IPPROTO_IP, IP_RECVTTL,
+              &sockopt_true, sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVTTL sg socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+    }
+    */
 
-#if BLOCKING_DISPATCH
-    // workaround for bug in dispatch:
-    // https://github.com/the-tcpdump-group/libpcap/issues/493
-    // That bug was conflicting with a race condition from using
-    // nonblocking, so i'd rarely get any packets on a slow iperf.
-    pcap_breakloop(instance->relay_pcap);
-#endif
 }
 
-static u_int pcap_errs = 0;
-static u_int pcap_packets = 0;
-static void
-relay_pcap_event_read(int fd, short __unused flags, void* uap)
+void
+relay_socket_read(int fd, short __unused flags, void* uap)
 {
     int rc;
-    relay_instance* instance;
-    // char msg[16] = {0};
-
-    instance = (relay_instance*)uap;
+    relay_instance* instance = (relay_instance*)uap;
 
     do {
-        rc = pcap_dispatch(instance->relay_pcap, 1, relay_pcap_read, uap);
-        if (rc > 0) {
-            pcap_packets += rc;
+        packet* pkt = relay_pkt_get(instance);
+
+        rc = relay_packet_read(fd, instance->tunnel_af, pkt, 2);
+        if (rc <= 0) {
+            relay_pkt_free(pkt);
+            break;
         }
+        // AMT data: https://tools.ietf.org/html/rfc7450#section-5.1.6
+        uint8_t* cp = pkt->pkt_data;
+        *cp = 6;
+        *(cp + 1) = 0;
+        switch (instance->tunnel_af) {
+        case AF_INET:
+        {
+            struct ip* iph = (struct ip*)(cp + 2);
+            prefix_free(pkt->pkt_dst);
+            prefix_free(pkt->pkt_src);
+            pkt->pkt_dst = prefix_build(AF_INET, &iph->ip_dst, INET_HOST_LEN);
+            pkt->pkt_src = prefix_build(AF_INET, &iph->ip_src, INET_HOST_LEN);
+        }
+        break;
+        case AF_INET6:
+        {
+            struct ip6_hdr* iph = (struct ip6_hdr*)(cp + 2);
+            prefix_free(pkt->pkt_dst);
+            prefix_free(pkt->pkt_src);
+            pkt->pkt_dst = prefix_build(
+                  AF_INET6, &iph->ip6_dst, INET6_HOST_LEN);
+            pkt->pkt_src = prefix_build(
+                  AF_INET6, &iph->ip6_src, INET6_HOST_LEN);
+        }
+        break;
+        default:
+            fprintf(stderr, "Unexpected AF in relay_socket_read\n");
+            exit(1);
+        }
+        relay_forward(pkt);
     } while (rc > 0);
-    if (rc == -1) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "pcap error (%u err/%u rx): %s\n", pcap_errs,
-                    pcap_packets, pcap_geterr(instance->relay_pcap));
-        }
-        pcap_errs += 1;
-    }
-    /*
-    else if (rc == -2) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "pcap breakloop (%u err/%u rx)\n", pcap_errs,
-                    pcap_packets);
-        }
-    } else {
-        if (rc != 0) {
-            snprintf(msg, sizeof(msg), "(%d) ", rc);
-        }
-    }
-    if (relay_debug(instance)) {
-        struct pcap_stat relay_pcap_stat;
-
-        pcap_stats(instance->relay_pcap, &relay_pcap_stat);
-        fprintf(stderr, "pcap_dispatch finished %s(%u err/%u rx): "
-                "%u rx, %u drp, %u ifdrp\n",
-                msg, pcap_errs, pcap_packets,
-                relay_pcap_stat.ps_recv, relay_pcap_stat.ps_drop,
-                relay_pcap_stat.ps_ifdrop);
-    }
-    */
 }
 
-int
-relay_pcap_create(relay_instance* instance)
-{
-    int rc;
-#ifdef BSD
-    int val;
-#endif /* BSD */
-    u_int32_t localnet, netmask;
-    char* device = NULL;
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* pd;
-
-    if (relay_debug(instance)) {
-        fprintf(stderr, "relay_pcap_create call\n");
-    }
-
-#if 0
-    device = pcap_lookupdev(errbuf);
-    if (device == NULL) {
-	fprintf(stderr, "error getting pcap device: %s\n", errbuf);
-	exit(1);
-    }
-#endif
-    if (strlen(instance->cap_iface_name) != 0) {
-        device = instance->cap_iface_name;
-    }
-    if (relay_debug(instance)) {
-        fprintf(stderr, "opening pcap on %s\n", device?device:"(NULL)");
-    }
-    pd = pcap_create(device, errbuf);
-    // pd = pcap_open_live(device, 1500, 0, 0, errbuf);
-    if (pd == NULL) {
-        fprintf(stderr, "error opening pcap device %s: %s\n",
-                device?device:"(NULL)", errbuf);
-        exit(1);
-    }
-
-    if (pcap_set_snaplen(pd, 1500) != 0) {
-        fprintf(
-              stderr, "error setting pcap snaplen: %s\n", pcap_geterr(pd));
-        exit(1);
-    }
-
-    if (pcap_set_promisc(pd, 0) != 0) {
-        fprintf(stderr, "error setting pcap to non-promisc: %s\n",
-              pcap_geterr(pd));
-        exit(1);
-    }
-
-    if (pcap_set_timeout(pd, 0) != 0) {
-        fprintf(
-              stderr, "error setting pcap timeout: %s\n", pcap_geterr(pd));
-        exit(1);
-    }
-
-    if (pcap_set_buffer_size(pd, instance->pcap_buffer_size) != 0) {
-        fprintf(stderr, "error setting pcap buffer size: %s\n",
-              pcap_geterr(pd));
-        exit(1);
-    }
-
-    if (pcap_activate(pd) != 0) {
-        fprintf(
-              stderr, "error setting pcap activate: %s\n", pcap_geterr(pd));
-        exit(1);
-    }
-
-#if defined(BSD) && defined(BIOCIMMEDIATE)
-    val = TRUE;
-    /*
-     * Turn on immediate mode in the Berkeley Packet Filter (bpf)
-     */
-    rc = ioctl(pcap_fileno(pd), BIOCIMMEDIATE, &val);
-    if (rc < 0) {
-        fprintf(stderr, "error setting BPF immediate mode: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-#endif /* BSD && BIOCIMMEDIATE */
-
-    localnet=0;
-    netmask = PCAP_NETMASK_UNKNOWN;
-    fprintf(stderr, "localnet: %08x, netmask: %08x\n", localnet, netmask);
-
-    /*
-    rc = pcap_lookupnet(device, &localnet, &netmask, errbuf);
-    if (rc < 0) {
-        fprintf(stderr, "error lookupnet pcap: %s\n", errbuf);
-        exit(1);
-    }
-
-    rc = pcap_compile(pd, &instance->relay_fcode,
-          "ip multicast or ip6 multicast", 0, netmask);
-    if (rc < 0) {
-        fprintf(stderr, "error compiling pcap expression: %s\n",
-              pcap_geterr(pd));
-        exit(1);
-    }
-
-    rc = pcap_setfilter(pd, &instance->relay_fcode);
-    if (rc < 0) {
-        fprintf(stderr, "error setting pcap filter: %s\n", pcap_geterr(pd));
-        exit(1);
-    }
-    */
-
-    instance->relay_datalink = pcap_datalink(pd);
-    if (instance->relay_datalink < 0) {
-        fprintf(
-              stderr, "error getting pcap datalink: %s\n", pcap_geterr(pd));
-        exit(1);
-    }
-
-    rc = pcap_setnonblock(pd, !BLOCKING_DISPATCH, errbuf);
-    if (rc < 0) {
-        fprintf(stderr, "error setting non block on pcap: %s\n",
-              pcap_geterr(pd));
-        exit(1);
-    }
-
-    instance->relay_pcap = pd;
-    event_set(&instance->relay_pcap_ev, pcap_fileno(pd),
-          EV_READ | EV_PERSIST, relay_pcap_event_read, (void*)instance);
-    rc = event_add(&instance->relay_pcap_ev, NULL);
-    if (rc < 0) {
-        fprintf(stderr, "error pcap event_add: %s\n", strerror(errno));
-        exit(1);
-    }
-
-    return 0;
-}
-
-int
-relay_pcap_destroy(relay_instance* instance)
-{
-    int rc;
-
-    /*
-     * Don't listen for traffic on this socket any more
-     */
-    if (relay_debug(instance)) {
-        fprintf(stderr, "relay_pcap_destroy call\n");
-    }
-
-    rc = event_del(&instance->relay_pcap_ev);
-    if (rc < 0) {
-        fprintf(stderr, "error from event_del on pcap: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-    pcap_freecode(&instance->relay_fcode);
-    pcap_close(instance->relay_pcap);
-    instance->relay_pcap = NULL;
-
-    return 0;
-}
