@@ -108,6 +108,10 @@ void
 relay_rif_free(recv_if* rif)
 {
     if (rif) {
+        if (rif->rif_ev) {
+            event_free(rif->rif_ev);
+            rif->rif_ev = NULL;
+        }
         mem_type_free(mem_rif_handle, rif);
     }
 }
@@ -346,7 +350,9 @@ igmp_decode(relay_instance* instance,
     /*
      * Save the inner IP header source address
      */
-    *from_ptr = prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
+    if (from_ptr) {
+        *from_ptr = prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
+    }
 
     switch (igmp->type) {
         case IGMP_HOST_MEMBERSHIP_REPORT:
@@ -551,7 +557,9 @@ mld_decode(relay_instance* instance,
     /*
  * Save the inner IP header source address
  */
-    *from_ptr = prefix_build(AF_INET6, ip->ip6_src.s6_addr, INET6_HOST_LEN);
+    if (from_ptr) {
+        *from_ptr = prefix_build(AF_INET6, ip->ip6_src.s6_addr, INET6_HOST_LEN);
+    }
 
     /* Process the MLD message */
     switch (mld_hdr->mld_type) {
@@ -1169,7 +1177,7 @@ relay_packet_deq(int fd, short event, void* uap)
     while ((queue < NUM_QUEUES)) {
         if (!TAILQ_EMPTY(&instance->pkt_head[queue]) &&
               deq_pkt_cnt < instance->dequeue_count) {
-            prefix_t *group, *source, *from;
+            prefix_t *group, *source;
             group_record_list_t grec_head;
             group_record_t* tmprec;
             mcast_source_t* tmpsrc;
@@ -1200,9 +1208,9 @@ relay_packet_deq(int fd, short event, void* uap)
                         prefix_t* src = NULL;
 
                         /*
-                         * the src prefix gets allocated here but is
-                         * referenced in the rif receive socket structure
-                         * so we don't free it here.
+                         * the src prefix gets allocated here and copied
+                         * to the rif receive socket structure
+                         * so we free it here.
                          */
                         if (relay_select_src_addr(instance, pkt->pkt_src,
                                   pkt->pkt_sport, &src)) {
@@ -1212,6 +1220,7 @@ relay_packet_deq(int fd, short event, void* uap)
                                       prefix2str(pkt->pkt_dst, str,
                                             sizeof(str)));
                             }
+                            prefix_free(src);
                             break;
                         }
                         /*
@@ -1222,6 +1231,7 @@ relay_packet_deq(int fd, short event, void* uap)
                         relay_create_recv_socket(instance, src);
 
                         relay_send_advertisement(pkt, nonce, src);
+                        prefix_free(src);
 
                     } else {
                         fprintf(stderr,
@@ -1281,7 +1291,6 @@ relay_packet_deq(int fd, short event, void* uap)
                 case AMT_MEMBERSHIP_CHANGE:
                     group = NULL;
                     source = NULL;
-                    from = NULL;
                     TAILQ_INIT(&grec_head);
                     /*
                      * lookup the relay gnonce for the 3-way handshake
@@ -1293,11 +1302,11 @@ relay_packet_deq(int fd, short event, void* uap)
                     }
 
                     mt = membership_pkt_decode(
-                          instance, pkt, &grec_head, &from);
+                          instance, pkt, &grec_head, NULL);
                     if (mt == FALSE) {
-                        if (relay_debug(instance))
-                            fprintf(stderr,
-                                  "Failed to decode membership pkt\n");
+                        if (relay_debug(instance)) {
+                            fprintf(stderr, "Failed to decode membership pkt\n");
+                        }
                         break;
                     }
                     while (!TAILQ_EMPTY(&grec_head)) {
@@ -1309,14 +1318,19 @@ relay_packet_deq(int fd, short event, void* uap)
                             case MEMBERSHIP_LEAVE:
                                 if (tmprec->nsrcs == 0) {
                                     membership_tree_refresh(instance, mt,
-                                          pkt, group, NULL, from);
+                                          pkt, group, NULL);
                                 } else {
                                     while (!TAILQ_EMPTY(&tmprec->src_head)) {
+                                        group = tmprec->group;
+                                        if (tmprec->nsrcs > 1) {
+                                            tmprec->group = prefix_dup(group);
+                                            tmprec->nsrcs--;
+                                        }
                                         tmpsrc = TAILQ_FIRST(
                                               &tmprec->src_head);
                                         source = tmpsrc->source;
                                         membership_tree_refresh(instance,
-                                              mt, pkt, group, source, from);
+                                              mt, pkt, group, source);
                                         TAILQ_REMOVE(&tmprec->src_head,
                                               tmpsrc, src_next);
                                         free(tmpsrc);
@@ -1335,7 +1349,7 @@ relay_packet_deq(int fd, short event, void* uap)
                 case AMT_MCAST_DATA:
                     if (relay_debug(instance)) {
                         static unsigned int data_pkts_recvd = 0;
-                        if (data_pkts_recvd % 10000 == 0) {
+                        if (data_pkts_recvd % 1000 == 0) {
                             fprintf(stderr,
                                 "Received %s data packet %u, len %d "
                                 "from %s:%u to %s:%u\n",
@@ -1702,7 +1716,7 @@ relay_instance_read(int fd, short __unused flags, void* uap)
                 break;
 
             case AMT_MCAST_DATA:
-                /* data from gateway not yet supported */
+                /* data from gateway not expected */
                 fprintf(stderr,
                       "received data from AMT gateway, not supported\n");
                 relay_pkt_free(pkt);
@@ -2134,7 +2148,15 @@ relay_socket_read(int fd, short __unused flags, void* uap)
             fprintf(stderr, "Unexpected AF in relay_socket_read\n");
             exit(1);
         }
-        relay_forward(pkt);
+        /*
+        char str[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
+        fprintf(stderr, "relay_pkt_get: %p (%s->%s)\n", pkt,
+                prefix2str(pkt->pkt_src, str, sizeof(str)),
+                prefix2str(pkt->pkt_dst, str2, sizeof(str2)));
+        */
+        // we only get data on this path.
+        pkt->pkt_amt = AMT_MCAST_DATA;
+        relay_packet_enq(instance, pkt);
     } while (rc > 0);
 }
 

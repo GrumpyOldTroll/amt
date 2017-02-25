@@ -105,7 +105,6 @@ typedef struct _relay_instance
     int relay_flags;                         /* instance flags */
     int relay_af;                            /* address family for relay */
     int tunnel_af;          /* address family for tunneled protocols*/
-    void* relay_context;    /* event context */
     int relay_anycast_sock; /* anycast socket */
     struct event *relay_anycast_ev;       /* libevent handle */
     pat_handle relay_root;               /* group/source patricia tree */

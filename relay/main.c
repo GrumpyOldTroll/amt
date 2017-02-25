@@ -75,6 +75,8 @@ relay_instance_alloc(int af)
               mem_type_init(sizeof(relay_instance), "Relay instance");
     }
     instance = (relay_instance*)mem_type_alloc(mem_rinstance_handle);
+    bzero(instance, sizeof(*instance));
+
     instance->relay_af = af;
     instance->tunnel_af = af;
 
@@ -99,13 +101,55 @@ relay_instance_alloc(int af)
     instance->relay_url_port = DEFAULT_URL_PORT;
     instance->agg_qdelay = 0;
     instance->n_qsamples = 0;
-    /* Zero all stats */
-    bzero(&instance->stats, sizeof(instance->stats));
 
     /* Capture interface index */
     instance->cap_iface_index = 0;
 
     return instance;
+}
+
+static void
+relay_instance_free(relay_instance* instance)
+{
+    TAILQ_REMOVE(&instance_head, instance, relay_next);
+    if (instance->relay_anycast_ev) {
+        event_free(instance->relay_anycast_ev);
+        instance->relay_anycast_ev = NULL;
+    }
+    if (instance->relay_url_ev) {
+        event_free(instance->relay_url_ev);
+        instance->relay_url_ev = NULL;
+    }
+    if (instance->relay_pkt_timer) {
+        event_free(instance->relay_pkt_timer);
+        instance->relay_pkt_timer = NULL;
+    }
+    if (instance->sk_listen_ev) {
+        event_free(instance->sk_listen_ev);
+        instance->sk_listen_ev = NULL;
+    }
+    if (instance->sk_read_ev) {
+        event_free(instance->sk_read_ev);
+        instance->sk_read_ev = NULL;
+    }
+    if (instance->icmp_sk_ev) {
+        event_free(instance->icmp_sk_ev);
+        instance->icmp_sk_ev = NULL;
+    }
+    patext* pat;
+    pat = pat_getnext(&instance->rif_root, NULL, 0);
+    while (pat) {
+        recv_if* rif = pat2rif(pat);
+        pat_delete(&instance->rif_root, pat);
+        relay_rif_free(rif);
+        pat = pat_getnext(&instance->rif_root, NULL, 0);
+    }
+    if (instance->event_base) {
+        event_base_free(instance->event_base);
+        instance->event_base = NULL;
+    }
+
+    mem_type_free(mem_rinstance_handle, instance);
 }
 
 static int
@@ -376,10 +420,9 @@ relay_dns_init(relay_instance* instance)
 static void
 relay_event_init(relay_instance* instance)
 {
-    instance->relay_context = event_init();
     instance->event_base = event_base_new();
-    if (instance->relay_context == NULL) {
-        fprintf(stderr, "event_init failed\n");
+    if (instance->event_base == NULL) {
+        fprintf(stderr, "event_base_new failed\n");
         exit(1);
     }
 }
@@ -397,7 +440,7 @@ relay_mcast_info(int signum)
               (unsigned long long)instance->stats.mcast_data_sent);
     }
 
-    exit(0);
+    event_base_loopbreak(instance->event_base);
 }
 
 /*
@@ -862,7 +905,13 @@ main(int argc, char** argv)
     relay_icmp_init(instance);
 
     rc = event_base_dispatch(instance->event_base);
-    fprintf(stderr, "failure calling event_dispatch: %s\n", strerror(rc));
+    if (rc) {
+        fprintf(stderr, "failure calling event_dispatch: %s\n", strerror(rc));
+    } else {
+        fprintf(stderr, "event_base_dispatch completed\n");
+    }
+    relay_instance_free(instance);
+    mem_shutdown();
 
     return rc;
 }

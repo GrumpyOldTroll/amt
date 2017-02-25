@@ -41,7 +41,6 @@ void membership_tree_refresh(relay_instance*,
       membership_type mt,
       packet*,
       prefix_t*,
-      prefix_t*,
       prefix_t*);
 void relay_forward(packet*);
 

@@ -101,3 +101,15 @@ mem_type_show(mem_print print, void* arg)
         (*print)(arg, mb->m_size, mb->m_alloced, mb->m_freed, mb->m_name);
     }
 }
+
+void
+mem_shutdown()
+{
+    mem_bits_t* mb = TAILQ_FIRST(&mem_head);
+    while (mb) {
+        TAILQ_REMOVE(&mem_head, mb, m_next);
+        free(mb);
+        mb = TAILQ_FIRST(&mem_head);
+    }
+}
+

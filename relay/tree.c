@@ -80,6 +80,12 @@ static void
 relay_sgnode_free(sgnode* sg)
 {
     if (sg) {
+        if (sg->sg_source) {
+            prefix_free(sg->sg_source);
+        }
+        if (sg->sg_group) {
+            prefix_free(sg->sg_group);
+        }
         mem_type_free(mem_sgnode_handle, sg);
     }
 }
@@ -103,6 +109,10 @@ static void
 relay_gw_free(gw_t* gw)
 {
     if (gw) {
+        if (gw->idle_timer) {
+            event_free(gw->idle_timer);
+            gw->idle_timer = NULL;
+        }
         mem_type_free(mem_gw_handle, gw);
     }
 }
@@ -184,6 +194,7 @@ membership_leave(sgnode* sg)
     } else {
         /* SSM */
         struct group_source_req gsreq;
+        bzero(&gsreq, sizeof(gsreq));
         gsreq.gsr_interface = instance->cap_iface_index;
         switch (instance->tunnel_af)
         /* switch(instance->relay_af) */
@@ -259,6 +270,7 @@ membership_join(sgnode* sg)
     if (sg->sg_source) {
         /* SSM */
         struct group_source_req gsreq;
+        bzero(&gsreq, sizeof(gsreq));
         gsreq.gsr_interface = instance->cap_iface_index;
         switch (instance->tunnel_af)
         {
@@ -375,7 +387,6 @@ gw_delete(gw_t* gw)
     pat_delete(&sg->sg_gwroot, &gw->gw_node);
     /* Canncel the idle timer for this gw */
     evtimer_del(gw->idle_timer);
-    event_free(gw->idle_timer);
 
     relay_gw_free(gw);
 }
@@ -493,8 +504,6 @@ gw_add(sgnode* sg, prefix_t* pfx)
 {
     gw_t* gw;
     patext* pat;
-    struct timeval tv;
-    int rc;
 
     pat = pat_get(&sg->sg_gwroot, prefix_keylen(pfx), prefix_key(pfx));
     if (pat) {
@@ -513,13 +522,18 @@ gw_add(sgnode* sg, prefix_t* pfx)
                     prefix_keylen(&gw->gw_dest));
         }
         /* Set the timer */
-        tv.tv_sec = GW_IDLE;
-        tv.tv_usec = 0;
         gw->idle_timer = evtimer_new(sg->sg_instance->event_base,
                 idle_delete, gw);
+        /*
+        // add is always followed by update, set happens there.
+        struct timeval tv;
+        int rc;
+        tv.tv_sec = GW_IDLE;
+        tv.tv_usec = 0;
         rc = evtimer_add(gw->idle_timer, &tv);
-        if (rc < 0) {
-            fprintf(stderr, "can't initialize gw idle timer: %s\n",
+        */
+        if (!gw->idle_timer) {
+            fprintf(stderr, "can't initialize gw idle timer(add): %s\n",
                   strerror(errno));
             exit(1);
         }
@@ -549,10 +563,10 @@ gw_update(gw_t* gw,
 
     tv.tv_sec = GW_IDLE;
     tv.tv_usec = 0;
-    evtimer_set(gw->idle_timer, idle_delete, gw);
+    // evtimer_set(gw->idle_timer, idle_delete, gw);
     rc = evtimer_add(gw->idle_timer, &tv);
     if (rc < 0) {
-        fprintf(stderr, "can't initialize gw idle timer: %s\n",
+        fprintf(stderr, "can't initialize gw idle timer(update): %s\n",
               strerror(errno));
         exit(1);
     }
@@ -608,8 +622,7 @@ membership_tree_refresh(relay_instance* instance,
       membership_type mt,
       packet* pkt,
       prefix_t* group,
-      prefix_t* source,
-      prefix_t* from __unused)
+      prefix_t* source)
 {
     patext* pat;
     sgnode* sg = NULL;
@@ -736,6 +749,9 @@ membership_tree_refresh(relay_instance* instance,
                         if (--sgcount == 0) {
                             // XXX: do i need something when out of sgs?
                         }
+                    } else {
+                        prefix_free(source);
+                        prefix_free(group);
                     }
                 } else {
                     if (relay_debug(instance)) {
@@ -749,6 +765,8 @@ membership_tree_refresh(relay_instance* instance,
                               prefix2str(pkt->pkt_src, str3, sizeof(str3)),
                               ntohs(pkt->pkt_sport));
                     }
+                    prefix_free(source);
+                    prefix_free(group);
                 }
             } else {
                 if (relay_debug(instance)) {
@@ -758,6 +776,8 @@ membership_tree_refresh(relay_instance* instance,
                                 ? "None"
                                 : prefix2str(source, str2, sizeof(str2)));
                 }
+                prefix_free(source);
+                prefix_free(group);
             }
             break;
 

@@ -50,5 +50,6 @@ mem_handle mem_type_init(int, const char* name);
 void* mem_type_alloc(mem_handle);
 void mem_type_free(mem_handle, void*);
 void mem_type_show(mem_print, void*);
+void mem_shutdown();
 
 #endif  // AMT_LIBMEM_MEMORY_H
