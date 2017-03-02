@@ -483,8 +483,7 @@ usage(char* name)
 
 int
 relay_socket_shared_init(int family,
-      struct sockaddr* bind_addr,
-      int bind_addr_len)
+      struct sockaddr* bind_addr)
 {
     int rc, val, len, sock;
     char str[MAX_ADDR_STRLEN];
@@ -503,6 +502,12 @@ relay_socket_shared_init(int family,
     }
 
     if (bind_addr) {
+        int bind_addr_len = 0;
+        if (family == AF_INET) {
+            bind_addr_len = sizeof(struct sockaddr_in);
+        } else if (family == AF_INET6) {
+            bind_addr_len = sizeof(struct sockaddr_in6);
+        }
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
             fprintf(stderr, "error binding socket (%s :%u/%u): %s\n",
@@ -646,13 +651,12 @@ relay_url_init(relay_instance* instance)
 
 static void
 relay_anycast_socket_init(relay_instance* instance,
-      struct sockaddr* listen_addr,
-      int addr_len)
+      struct sockaddr* listen_addr)
 {
     int rc;
 
     instance->relay_anycast_sock = relay_socket_shared_init(
-          instance->relay_af, listen_addr, addr_len);
+          instance->relay_af, listen_addr);
 
     instance->relay_anycast_ev = event_new(instance->event_base,
             instance->relay_anycast_sock, EV_READ | EV_PERSIST,
@@ -750,10 +754,9 @@ main(int argc, char** argv)
 
                 switch (instance->relay_af) {
                     case AF_INET: {
-                        struct in_addr prefix;
                         struct sockaddr_in *addrp =
                             (struct sockaddr_in*)&listen_addr;
-                        rc = inet_pton(AF_INET, pstr, &prefix);
+                        rc = inet_pton(AF_INET, pstr, &addrp->sin_addr);
                         if (rc == 1) {
                             plen = strtol(optarg, NULL, 10);
                             if (plen == 0) {
@@ -767,8 +770,6 @@ main(int argc, char** argv)
                                 exit(1);
                             }
                             addrp->sin_family = AF_INET;
-                            bcopy(&prefix, &addrp->sin_addr,
-                                    sizeof(prefix));
                         } else {
                             fprintf(stderr, "bad anycast prefix\n");
                             exit(1);
@@ -776,10 +777,9 @@ main(int argc, char** argv)
                         break;
                     }
                     case AF_INET6: {
-                        struct in6_addr prefix;
                         struct sockaddr_in6 *addrp =
                             (struct sockaddr_in6*)&listen_addr;
-                        rc = inet_pton(AF_INET6, pstr, &prefix);
+                        rc = inet_pton(AF_INET6, pstr, &addrp->sin6_addr);
                         if (rc == 1) {
                             plen = strtol(optarg, NULL, 10);
                             if (plen == 0) {
@@ -793,8 +793,6 @@ main(int argc, char** argv)
                                 exit(1);
                             }
                             addrp->sin6_family = AF_INET6;
-                            bcopy(&prefix, &addrp->sin6_addr,
-                                    sizeof(prefix));
                         } else {
                             fprintf(stderr, "bad anycast prefix\n");
                             exit(1);
@@ -902,8 +900,9 @@ main(int argc, char** argv)
 
     relay_event_init(instance);
     relay_signal_init(instance);
+
     relay_anycast_socket_init(
-          instance, (struct sockaddr*)&listen_addr, sizeof(listen_addr));
+          instance, (struct sockaddr*)&listen_addr);
     relay_url_init(instance);
     relay_dns_init(instance);
     relay_icmp_init(instance);

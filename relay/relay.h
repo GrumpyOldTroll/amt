@@ -293,7 +293,7 @@ typedef struct _group_record
 void relay_instance_read(int, short, void*);
 void relay_accept_url(int, short, void*);
 void relay_sg_except_read(int, short, void*);
-int relay_socket_shared_init(int, struct sockaddr*, int);
+int relay_socket_shared_init(int family, struct sockaddr*);
 void relay_rif_free(recv_if*);
 void relay_socket_init(sgnode* sg);
 void relay_socket_read(int fd, short flags, void* uap);

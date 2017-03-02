@@ -828,10 +828,8 @@ relay_select_src_addr(relay_instance* instance,
 static void
 relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
 {
-    int rc, srclen;
-    struct sockaddr_in src;
-    struct sockaddr_in6 src6;
-    struct sockaddr* src_sa = NULL;
+    int rc;
+    struct sockaddr_storage src;
     patext* pat;
     recv_if* rif;
 
@@ -855,19 +853,16 @@ relay_create_recv_socket(relay_instance* instance, prefix_t* src_pfx)
     pat_add(&instance->rif_root, &rif->rif_node);
 
     if (instance->relay_af == AF_INET) {
-        src_sa = (struct sockaddr*)&src;
-        srclen = sizeof(src);
-        prefix2sin(src_pfx, &src);
-        src.sin_port = htons(instance->amt_port);
+        prefix2sin(src_pfx, (struct sockaddr_in*)&src);
+        ((struct sockaddr_in*)&src)->sin_port = htons(instance->amt_port);
     } else {
-        src_sa = (struct sockaddr*)&src6;
-        srclen = sizeof(src6);
-        prefix2sin6(src_pfx, &src6);
-        src6.sin6_port = htons(instance->amt_port);
+        prefix2sin6(src_pfx, (struct sockaddr_in6*)&src);
+        ((struct sockaddr_in6*)&src)->sin6_port =
+            htons(instance->amt_port);
     }
 
-    rif->rif_sock =
-          relay_socket_shared_init(instance->relay_af, src_sa, srclen);
+    rif->rif_sock = relay_socket_shared_init(instance->relay_af,
+                  (struct sockaddr*)&src);
 
     rif->rif_ev = event_new(instance->event_base, rif->rif_sock,
             EV_READ | EV_PERSIST, relay_instance_read, (void*)instance);
