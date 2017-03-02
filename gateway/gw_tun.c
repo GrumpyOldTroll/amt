@@ -51,8 +51,6 @@
 #else
 #include <linux/if_tun.h>
 #endif
-#include <linux/igmp.h>
-#include <netinet/igmp.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
@@ -63,6 +61,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "igmp.h"  // copied from freebsd, linux doesn't have v3 in 2017
 #include "amt.h"
 #include "gw.h"
 
@@ -284,10 +283,10 @@ cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31]);
                     iphlen = ip_get_hl(ip);
                     cp = ((uint8_t*)ip) + iphlen;
                     switch (*cp) {
-                        case IGMP_V1_MEMBERSHIP_REPORT:
-                        case IGMP_V2_MEMBERSHIP_REPORT:
-                        case IGMP_V2_LEAVE_GROUP:
-                        case IGMPV3_HOST_MEMBERSHIP_REPORT:
+                        case IGMP_v1_HOST_MEMBERSHIP_REPORT:
+                        case IGMP_v2_HOST_MEMBERSHIP_REPORT:
+                        case IGMP_HOST_LEAVE_MESSAGE:
+                        case IGMP_v3_HOST_MEMBERSHIP_REPORT:
                             gw_request_start(gw, (uint8_t*)ip, len);
                             break;
                         case IGMP_HOST_MEMBERSHIP_QUERY:

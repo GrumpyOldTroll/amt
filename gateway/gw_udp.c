@@ -30,6 +30,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/errno.h>
@@ -37,17 +38,14 @@
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/types.h>
-#ifndef BSD
-#include <linux/igmp.h>
-#endif
 #include <assert.h>
 #include <event.h>
-#include <netinet/igmp.h>
+//#include <netinet/igmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "igmp.h"  // copied from freebsd--linux doesn't have v3 in 2017
 #include "amt.h"
 #include "gw.h"
 #include "in_cksum.h"
@@ -560,7 +558,7 @@ gw_recv_query(gw_t* gw, u_int8_t* cp, int len)
      */
     if (len > 0 && !evtimer_pending(&gw->query_timer, NULL)) {
         struct ip* iph;
-        struct igmpv3_query* igmpq = NULL;
+        struct igmpv3* igmpq = NULL;
         int qqi, mrt, rc, hlen, plen;
         struct timeval tv;
 
@@ -570,11 +568,11 @@ gw_recv_query(gw_t* gw, u_int8_t* cp, int len)
 
         switch (iph->ip_p) {
             case IPPROTO_IGMP:
-                igmpq = (struct igmpv3_query*)((u_int8_t*)iph + hlen);
-                switch (igmpq->type) {
+                igmpq = (struct igmpv3*)((u_int8_t*)iph + hlen);
+                switch (igmpq->igmp_type) {
                     case IGMP_HOST_MEMBERSHIP_QUERY:
-                        qqi = AMT_IGMP_QQIC_TO_QQI(igmpq->qqic);
-                        mrt = AMT_IGMP_MRC_TO_MRT(igmpq->code);
+                        qqi = AMT_IGMP_QQIC_TO_QQI(igmpq->igmp_qqi);
+                        mrt = AMT_IGMP_MRC_TO_MRT(igmpq->igmp_code);
 
                         bcopy(cp, gw->query_buffer, plen);
                         gw->query_len = plen;

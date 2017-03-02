@@ -195,7 +195,7 @@ icmp_recv(int fd, short __unused flags, void* uap)
     // gw_t* gw;
     const char* res;
     const struct icmphdr* ih;
-    const struct iphdr* iph;
+    const struct ip* iph;
     u_int32_t dest;
 
     bzero(buf, sizeof(buf));
@@ -207,19 +207,25 @@ icmp_recv(int fd, short __unused flags, void* uap)
         return;
     }
 
-    iph = (const struct iphdr*)buf;
-    ih = (const struct icmphdr*)(buf + iph->ihl * 4);
+    iph = (const struct ip*)buf;
+    ih = (const struct icmphdr*)(buf + iph->ip_hl * 4);
+#ifdef BSD
+#define ICMP_TYPE(ic) ((ic)->icmp_type)
+#else
+#define ICMP_TYPE(ic) ((ic)->type)
+#endif
 
-    switch (ih->type) {
-        case ICMP_DEST_UNREACH:
-        case ICMP_SOURCE_QUENCH:
-            iph = (const struct iphdr*)(buf + iph->ihl * 4 +
+    switch (ICMP_TYPE(ih)) {
+        case ICMP_UNREACH:
+        case ICMP_SOURCEQUENCH:
+            iph = (const struct ip*)(buf + iph->ip_hl * 4 +
                                         sizeof(struct icmphdr));
-            dest = iph->daddr;
+            dest = iph->ip_dst.s_addr;
             break;
         default:
             if (relay_debug(instance))
-                fprintf(stderr, "Other ICMP message type: %d\n", ih->type);
+                fprintf(stderr, "Other ICMP message type: %d\n",
+                        ICMP_TYPE(ih));
             return;
     }
 
@@ -685,9 +691,7 @@ main(int argc, char** argv)
     instance->enable_queuing_delay_test = 0;
 
     bzero((char*)&listen_addr, sizeof(listen_addr));
-#ifdef BSD
-    listen_addr.sin_len = sizeof(listen_addr);
-#endif
+
     plen = 0;
     tunnel_addr[0] = '\0';
 

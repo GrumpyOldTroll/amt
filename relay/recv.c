@@ -52,28 +52,31 @@ static const char __attribute__((unused)) id[] =
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#ifdef BSD
-#include <net/if_dl.h>
-#endif /* BSD */
 #define __USE_GNU 1
 #include <arpa/inet.h>
-#include <linux/igmp.h>
 #include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#include <netinet/icmp6.h>
+#ifdef BSD
+#include <net/if_dl.h>
+#include <netinet6/mld6.h>
+#else
+#include "mld6.h" // copied from FREEBSD 11.0
+#endif
 #include <netinet/udp.h>
 
 #include <event.h>
 
 #include <md5.h>
 
+#include "igmp.h"
 #include "amt.h"
 #include "hmac.h"
 #include "in_cksum.h"
 #include "memory.h"
-#include "mld.h"
 #include "pat.h"
 #include "prefix.h"
 #include "relay.h"
@@ -204,44 +207,44 @@ free_grecord_list(group_record_list_t* grec_head)
  */
 static int
 parse_igmp_record(relay_instance* instance,
-      struct igmpv3_report* igmp,
+      struct igmp_report* igmp,
       group_record_list_t* grec_head)
 {
     u_int32_t mc_addr;
     group_record_t* tmp;
-    struct igmpv3_grec* igmp_grec;
+    struct igmp_grouprec* igmp_grec;
     mcast_source_t* gsrc;
     u_int16_t cnt, ngrec, nsrcs;
     membership_type mt = 0;
 
-    ngrec = ntohs(igmp->ngrec);
-    igmp_grec = &igmp->grec[0];
+    ngrec = ntohs(igmp->ir_numgrps);
+    igmp_grec = (struct igmp_grouprec*)(igmp + 1);
     while (ngrec--) {
         /* Number of sources in this group record */
-        nsrcs = ntohs(igmp_grec->grec_nsrcs);
+        nsrcs = ntohs(igmp_grec->ig_numsrc);
 
         /* Record Type */
-        switch (igmp_grec->grec_type) {
-            case IGMPV3_MODE_IS_INCLUDE:
-            case IGMPV3_CHANGE_TO_INCLUDE:
+        switch (igmp_grec->ig_type) {
+            case IGMP_MODE_IS_INCLUDE:
+            case IGMP_CHANGE_TO_INCLUDE_MODE:
                 if (nsrcs > 0) {
                     mt = MEMBERSHIP_REPORT;
                 } else {
                     mt = MEMBERSHIP_LEAVE;
                 }
                 break;
-            case IGMPV3_MODE_IS_EXCLUDE:
-            case IGMPV3_CHANGE_TO_EXCLUDE:
+            case IGMP_MODE_IS_EXCLUDE:
+            case IGMP_CHANGE_TO_EXCLUDE_MODE:
                 if (nsrcs > 0) {
                     mt = MEMBERSHIP_LEAVE;
                 } else {
                     mt = MEMBERSHIP_REPORT;
                 }
                 break;
-            case IGMPV3_ALLOW_NEW_SOURCES:
+            case IGMP_ALLOW_NEW_SOURCES:
                 mt = MEMBERSHIP_REPORT;
                 break;
-            case IGMPV3_BLOCK_OLD_SOURCES:
+            case IGMP_BLOCK_OLD_SOURCES:
                 mt = MEMBERSHIP_LEAVE;
                 break;
             default:
@@ -259,7 +262,7 @@ parse_igmp_record(relay_instance* instance,
         tmp->nsrcs = nsrcs;
 
         /* Set Multicast group address */
-        mc_addr = igmp_grec->grec_mca;
+        mc_addr = igmp_grec->ig_group.s_addr;
         if (IN_MULTICAST(ntohl(mc_addr))) {
             tmp->group = prefix_build(AF_INET, &mc_addr, INET_HOST_LEN);
         } else {
@@ -269,9 +272,10 @@ parse_igmp_record(relay_instance* instance,
         }
 
         /* Add Sources */
+        struct in_addr* grec_src = (struct in_addr*)(igmp_grec + 1);
         TAILQ_INIT(&tmp->src_head);
         for (cnt = 0; cnt < nsrcs; cnt++) {
-            u_int32_t src = igmp_grec->grec_src[cnt];
+            u_int32_t src = grec_src[cnt].s_addr;
             if ((gsrc = calloc(1, sizeof(mcast_source_t))) == NULL) {
                 free_grecord_list(grec_head);
                 return FALSE;
@@ -286,9 +290,9 @@ parse_igmp_record(relay_instance* instance,
         TAILQ_INSERT_TAIL(grec_head, tmp, rec_next);
 
         /* Go the the next record */
-        igmp_grec = (struct igmpv3_grec*)(((u_int8_t*)igmp_grec) +
-                                          sizeof(struct igmpv3_grec) +
-                                          igmp_grec->grec_auxwords * 4 +
+        igmp_grec = (struct igmp_grouprec*)(((u_int8_t*)igmp_grec) +
+                                          sizeof(struct igmp_grouprec) +
+                                          igmp_grec->ig_datalen * 4 +
                                           (nsrcs)*4);
     }
     return TRUE;
@@ -305,7 +309,7 @@ igmp_decode(relay_instance* instance,
 {
     int hlen, len, pktlen;
     struct ip* ip;
-    struct igmphdr* igmp;
+    struct igmpv3* igmp;
     group_record_t* tmp;
     u_int8_t* cp;
     u_int32_t mc_addr;
@@ -325,7 +329,7 @@ igmp_decode(relay_instance* instance,
 
     hlen = ip->ip_hl << 2;
 
-    igmp = (struct igmphdr*)((u_int8_t*)ip + hlen);
+    igmp = (struct igmpv3*)((u_int8_t*)ip + hlen);
     len = ntohs(ip->ip_len);
 
     if (len != pktlen) {
@@ -354,15 +358,15 @@ igmp_decode(relay_instance* instance,
         *from_ptr = prefix_build(AF_INET, &ip->ip_src.s_addr, INET_HOST_LEN);
     }
 
-    switch (igmp->type) {
-        case IGMP_HOST_MEMBERSHIP_REPORT:
-        case IGMPV2_HOST_MEMBERSHIP_REPORT:
+    switch (igmp->igmp_type) {
+        case IGMP_v1_HOST_MEMBERSHIP_REPORT:
+        case IGMP_v2_HOST_MEMBERSHIP_REPORT:
             if ((tmp = calloc(1, sizeof(group_record_t))) == NULL) {
                 return FALSE;
             }
 
             /* Multicast group address */
-            mc_addr = igmp->group;
+            mc_addr = igmp->igmp_group.s_addr;
             if (IN_MULTICAST(ntohl(mc_addr))) {
                 tmp->group = prefix_build(AF_INET, &mc_addr, INET_HOST_LEN);
             } else {
@@ -379,7 +383,7 @@ igmp_decode(relay_instance* instance,
             }
 
             /* Multicast group address */
-            mc_addr = igmp->group;
+            mc_addr = igmp->igmp_group.s_addr;
             if (IN_MULTICAST(ntohl(mc_addr))) {
                 tmp->group = prefix_build(AF_INET, &mc_addr, INET_HOST_LEN);
             } else {
@@ -390,8 +394,8 @@ igmp_decode(relay_instance* instance,
             tmp->mt = MEMBERSHIP_LEAVE;
             TAILQ_INSERT_TAIL(grec_head, tmp, rec_next);
             break;
-        case IGMPV3_HOST_MEMBERSHIP_REPORT: {
-            if (parse_igmp_record(instance, (struct igmpv3_report*)igmp,
+        case IGMP_v3_HOST_MEMBERSHIP_REPORT: {
+            if (parse_igmp_record(instance, (struct igmp_report*)igmp,
                       grec_head) == FALSE) {
                 /* TODO: Free membership records */
                 return FALSE;
@@ -407,41 +411,41 @@ igmp_decode(relay_instance* instance,
 
 static int
 parse_mld_record(relay_instance* instance,
-      struct mld2_report* mld_report_hdr,
+      struct mldv2_report* mld_report_hdr,
       group_record_list_t* grec_head)
 {
-    struct mld2_grec* grec;
+    struct mldv2_record* grec;
     u_int16_t cnt, ngrecs, nsrcs;
     group_record_t* tmp;
     membership_type mt = 0;
     struct in6_addr src_addr;
     mcast_source_t* gsrc;
 
-    ngrecs = ntohs(mld_report_hdr->mld2r_ngrec);
-    grec = mld_report_hdr->mld2r_grec;
+    ngrecs = ntohs(mld_report_hdr->mld_numrecs);
+    grec = (struct mldv2_record*)(mld_report_hdr + 1);
     while (ngrecs--) {
-        nsrcs = ntohs(grec->grec_nsrcs);
-        switch (grec->grec_type) {
-            case MLD2_CHANGE_TO_INCLUDE:
-            case MLD2_MODE_IS_INCLUDE: {
+        nsrcs = ntohs(grec->mr_numsrc);
+        switch (grec->mr_type) {
+            case MLD_CHANGE_TO_INCLUDE_MODE:
+            case MLD_MODE_IS_INCLUDE: {
                 if (nsrcs > 0)
                     mt = MEMBERSHIP_REPORT;
                 else
                     mt = MEMBERSHIP_LEAVE;
                 break;
             }
-            case MLD2_MODE_IS_EXCLUDE:
-            case MLD2_CHANGE_TO_EXCLUDE: {
+            case MLD_MODE_IS_EXCLUDE:
+            case MLD_CHANGE_TO_EXCLUDE_MODE: {
                 if (nsrcs > 0)
                     mt = MEMBERSHIP_LEAVE;
                 else
                     mt = MEMBERSHIP_REPORT;
                 break;
             }
-            case MLD2_ALLOW_NEW_SOURCES:
+            case MLD_ALLOW_NEW_SOURCES:
                 mt = MEMBERSHIP_REPORT;
                 break;
-            case MLD2_BLOCK_OLD_SOURCES:
+            case MLD_BLOCK_OLD_SOURCES:
                 mt = MEMBERSHIP_LEAVE;
                 break;
         }
@@ -456,17 +460,18 @@ parse_mld_record(relay_instance* instance,
         tmp->mt = mt;
         tmp->nsrcs = nsrcs;
 #define IN6_MULTICAST(addr) (((addr) & (0xff)) == 0xff)
-        if (IN6_MULTICAST(grec->grec_mca.s6_addr[0])) {
+        if (IN6_MULTICAST(grec->mr_addr.s6_addr[0])) {
             tmp->group = prefix_build(
-                  AF_INET6, grec->grec_mca.s6_addr, INET6_HOST_LEN);
+                  AF_INET6, grec->mr_addr.s6_addr, INET6_HOST_LEN);
         } else {
             instance->stats.mld_group_invalid++;
             free(tmp);
             continue;
         }
         TAILQ_INIT(&tmp->src_head);
+        struct in6_addr* grec_src = (struct in6_addr*)(grec + 1);
         for (cnt = 0; cnt < nsrcs; cnt++) {
-            src_addr = grec->grec_src[cnt];
+            src_addr = grec_src[cnt];
             if ((gsrc = calloc(1, sizeof(mcast_source_t))) == NULL) {
                 free_grecord_list(grec_head);
                 free(tmp);
@@ -482,9 +487,9 @@ parse_mld_record(relay_instance* instance,
         TAILQ_INSERT_TAIL(grec_head, tmp, rec_next);
 
         /* Go the the next record */
-        grec = (struct mld2_grec*)((u_int8_t*)grec + sizeof(*grec) +
-                                   (grec->grec_auxwords << 2) +
-                                   (nsrcs << 4));
+        grec = (struct mldv2_record*)((u_int8_t*)grec + sizeof(*grec) +
+                                   (grec->mr_datalen * 4) +
+                                   (nsrcs * 16));
     }
 
     return TRUE;
@@ -502,8 +507,8 @@ mld_decode(relay_instance* instance,
     struct ip6_hdr* ip;
     struct ip6_ext* ext_hdr;
     u_int8_t hdr_type;
-    struct mld_msg* mld_hdr;
-    struct mld2_report* mld_report_hdr;
+    struct mldv2_query* mld_hdr;
+    struct mldv2_report* mld_report_hdr;
 
     pktlen = pkt->pkt_len;
 
@@ -539,11 +544,11 @@ mld_decode(relay_instance* instance,
         return MEMBERSHIP_ERROR;
     }
 
-    mld_hdr = (struct mld_msg*)cp;
+    mld_hdr = (struct mldv2_query*)cp;
     pktlen -= iphlen;
     pktlen += sizeof(*ip); /* compensation */
 
-#define MLD_MIMLEN (sizeof(struct mld2_report) + sizeof(struct mld2_grec))
+#define MLD_MIMLEN (sizeof(struct mldv2_report) + sizeof(struct mldv2_record))
     if (pktlen < MLD_MIMLEN) {
         instance->stats.mld_short_bad++;
         return MEMBERSHIP_ERROR;
@@ -561,10 +566,20 @@ mld_decode(relay_instance* instance,
         *from_ptr = prefix_build(AF_INET6, ip->ip6_src.s6_addr, INET6_HOST_LEN);
     }
 
+#ifndef BSD
+// linux/bsd compatibility shim. Not there in ubuntu16.04 netinet/icmp6.h
+// (though it is in linux/icmpv6.h, but i can't include that one...)
+// value = 143
+#ifndef MLDV2_LISTENER_REPORT 
+#define MLDV2_LISTENER_REPORT 143
+#endif
+
+#endif
+
     /* Process the MLD message */
-    switch (mld_hdr->mld_type) {
-        case ICMPV6_MLD2_REPORT: {
-            mld_report_hdr = (struct mld2_report*)mld_hdr;
+    switch (mld_hdr->mld_icmp6_hdr.icmp6_type) {
+        case MLDV2_LISTENER_REPORT: {
+            mld_report_hdr = (struct mldv2_report*)mld_hdr;
             if (parse_mld_record(instance, mld_report_hdr, grec_head) ==
                   FALSE) {
                 return FALSE;
@@ -992,7 +1007,7 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
         /* switch (pkt->pkt_src->family) { */
         case AF_INET: {
             struct ip* iph;
-            struct igmpv3_query* igmpq;
+            struct igmpv3* igmpq;
             struct sockaddr_in* src_addr;
             iph = (struct ip*)cp;
             /* Fill IP header */
@@ -1000,7 +1015,7 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             iph->ip_v = 4;
             iph->ip_tos = 0;
             iph->ip_len =
-                  htons(sizeof(struct ip) + sizeof(struct igmpv3_query));
+                  htons(sizeof(struct ip) + sizeof(struct igmpv3));
             iph->ip_id = htons(54321);
             iph->ip_off = 0;
             iph->ip_ttl = 1;
@@ -1011,35 +1026,38 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             iph->ip_dst.s_addr = inet_addr("224.0.0.1");
 
             /* IGMPv3 membership query */
-            igmpq = (struct igmpv3_query*)(cp + sizeof(struct ip));
-            igmpq->type = IGMP_HOST_MEMBERSHIP_QUERY;
-            igmpq->code = 100;
-            igmpq->csum = 0;
-            igmpq->group = 0;
-            igmpq->qrv = 0;
-            igmpq->suppress = 1;
-            igmpq->resv = 0;
-            igmpq->qqic = QQIC;
-            igmpq->nsrcs = 0;
-            igmpq->srcs[0] = 0;
-            igmpq->csum = csum((unsigned short*)igmpq,
-                               sizeof(struct igmpv3_query) / 2);
+            igmpq = (struct igmpv3*)(cp + sizeof(struct ip));
+            igmpq->igmp_type = IGMP_HOST_MEMBERSHIP_QUERY;
+            igmpq->igmp_code = 100;
+            igmpq->igmp_cksum = 0;
+            igmpq->igmp_group.s_addr = 0;
+            igmpq->igmp_misc = (1 << 3); // suppress=1
+            igmpq->igmp_qqi = QQIC;
+            igmpq->igmp_numsrc = 0;
+            // igmpq->srcs[0] = 0; // removed: any chance this was a buffer overflow?
+            igmpq->igmp_cksum = csum((unsigned short*)igmpq,
+                               sizeof(struct igmpv3) / 2);
             iph->ip_sum = csum((unsigned short*)iph,
                                sizeof(struct ip) / 2);
-            len = sizeof(struct ip) + sizeof(struct igmpv3_query);
+            len = sizeof(struct ip) + sizeof(struct igmpv3);
             break;
         }
         case AF_INET6: {
             struct ip6_hdr* iph;
-            struct mld2_query* mld_query_hdr;
+            struct mldv2_query* mld_query_hdr;
             u_int8_t* chdr;
-            struct ip6_pseudo* pseudo_hdr;
+            struct ip6_pseudo_ {
+                struct in6_addr src;
+                struct in6_addr dst;
+                uint32_t uplen;
+                uint32_t nxthdr;
+            } *pseudo_hdr;
             struct sockaddr_in6* src_addr;
             u_int8_t r_alert[8] = { IPPROTO_ICMPV6, 0, IP6OPT_ROUTER_ALERT,
                 2, 0, 0, IP6OPT_PADN, 0 };
 
             chdr = (u_int8_t*)malloc(
-                  sizeof(struct ip6_pseudo) + sizeof(*mld_query_hdr));
+                  sizeof(*pseudo_hdr) + sizeof(*mld_query_hdr));
             if (chdr == NULL)
                 return 0;
 
@@ -1055,30 +1073,26 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             bcopy(r_alert, cp + sizeof(*iph), sizeof(r_alert));
 
             cp += (sizeof(*iph) + sizeof(r_alert));
-            mld_query_hdr = (struct mld2_query*)cp;
-            mld_query_hdr->mld2q_type = ICMPV6_MGM_QUERY;
-            mld_query_hdr->mld2q_code = 0;
-            mld_query_hdr->mld2q_cksum = 0;
-            mld_query_hdr->mld2q_mrc = htons(100);
-            mld_query_hdr->mld2q_resv1 = 0;
-            bzero(&mld_query_hdr->mld2q_mca, sizeof(struct in6_addr));
-            mld_query_hdr->mld2q_qrv = 0;
-            mld_query_hdr->mld2q_suppress = 1;
-            mld_query_hdr->mld2q_qqic = QQIC;
-            mld_query_hdr->mld2q_nsrcs = 0;
-            mld_query_hdr->mld2q_resv2 = 0;
+            mld_query_hdr = (struct mldv2_query*)cp;
+            bzero(mld_query_hdr, sizeof(*mld_query_hdr));
+            mld_query_hdr->mld_icmp6_hdr.icmp6_type = MLD_LISTENER_QUERY;
+            mld_query_hdr->mld_icmp6_hdr.icmp6_dataun.icmp6_un_data16[0] = htons(100);
+            mld_query_hdr->mld_misc = (1 << 3);
+            // mld_query_hdr->mld2q_suppress = 1;
+            mld_query_hdr->mld_qqi = QQIC;
+            mld_query_hdr->mld_numsrc = 0;
             cp += sizeof(*mld_query_hdr);
 
             iph->ip6_plen = htons(cp - (u_int8_t*)iph - sizeof(*iph));
 
-            pseudo_hdr = (struct ip6_pseudo*)chdr;
+            pseudo_hdr = (struct ip6_pseudo_*)chdr;
             bcopy(&iph->ip6_src, &pseudo_hdr->src, sizeof(struct in6_addr));
             bcopy(&iph->ip6_dst, &pseudo_hdr->dst, sizeof(struct in6_addr));
             pseudo_hdr->uplen = htonl(cp - (u_int8_t*)iph - sizeof(*iph));
             pseudo_hdr->nxthdr = htonl(IPPROTO_ICMPV6);
             bcopy(mld_query_hdr, chdr + sizeof(*pseudo_hdr),
                   sizeof(*mld_query_hdr));
-            mld_query_hdr->mld2q_cksum = csum((unsigned short*)chdr,
+            mld_query_hdr->mld_icmp6_hdr.icmp6_cksum = csum((unsigned short*)chdr,
                   (sizeof(*pseudo_hdr) + sizeof(*mld_query_hdr)) >> 1);
             free(chdr);
 
@@ -1576,8 +1590,11 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
                 switch (cmsgp->cmsg_type) {
 #if BSD
                 case IP_RECVIF:
-                    dl_addr = (struct sockaddr_dl*)CMSG_DATA(cmsgp);
+                {
+                    struct sockaddr_dl* dl_addr =
+                        (struct sockaddr_dl*)CMSG_DATA(cmsgp);
                     pkt->pkt_ifindex = dl_addr->sdl_index;
+                }
                 break;
                 case IP_RECVDSTADDR:
                     assert(cmsgp->cmsg_len >= sizeof(struct in_addr));
@@ -1656,7 +1673,7 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
         // XXX: IPv6 options, etc. for data forwarding! -Jake
         cmsgp = CMSG_FIRSTHDR(&msghdr);
         while (cmsgp) {
-            if (cmsgp->cmsg_level == SOL_IPV6) {
+            if (cmsgp->cmsg_level == IPPROTO_IPV6) {
                 switch (cmsgp->cmsg_type) {
                 case IPV6_PKTINFO:
                 {
@@ -2023,20 +2040,22 @@ relay_socket_init(sgnode* sg)
                 strerror(errno));
         exit(1);
     }
-#ifdef BSD
-    rc = setsockopt(sock, IPPROTO_IP, IP_RECVDSTADDR, &trueval, len);
-    if (rc < 0) {
-        fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-    rc = setsockopt(sock, IPPROTO_IP, IP_RECVIF, &trueval, len);
-    if (rc < 0) {
-        fprintf(stderr, "error IP_RECVIF on socket: %s\n", strerror(errno));
-        exit(1);
-    }
-#else
     if (family == AF_INET) {
+#ifdef BSD
+        rc = setsockopt(sock, IPPROTO_IP, IP_RECVDSTADDR, &trueval,
+                sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVDSTADDR on socket: %s\n",
+                  strerror(errno));
+            exit(1);
+        }
+        rc = setsockopt(sock, IPPROTO_IP, IP_RECVIF, &trueval,
+                sizeof(int));
+        if (rc < 0) {
+            fprintf(stderr, "error IP_RECVIF on socket: %s\n", strerror(errno));
+            exit(1);
+        }
+#else
         rc = setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &trueval,
                 sizeof(int));
         if (rc < 0) {
@@ -2044,6 +2063,7 @@ relay_socket_init(sgnode* sg)
                   strerror(errno));
             exit(1);
         }
+#endif
     } else {
         rc = setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &trueval,
                 sizeof(int));
@@ -2053,7 +2073,6 @@ relay_socket_init(sgnode* sg)
             exit(1);
         }
     }
-#endif
 
     rc = fcntl(sock, F_GETFL, 0);
     if (rc < 0) {

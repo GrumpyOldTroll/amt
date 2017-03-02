@@ -33,8 +33,7 @@
 static const char __attribute__((unused)) id[] =
       "@(#) $Id: prefix.c,v 1.1.1.8 2007/05/09 20:41:57 sachin Exp $";
 
-#include "prefix.h"
-#include "memory.h"
+#include <sys/types.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -44,7 +43,9 @@ static const char __attribute__((unused)) id[] =
 #include <stdio.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
-#include <sys/types.h>
+
+#include "prefix.h"
+#include "memory.h"
 
 static mem_handle mem_prefix_handle = NULL;
 
