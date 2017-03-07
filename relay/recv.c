@@ -721,15 +721,37 @@ relay_response_mac_verify(packet* pkt)
 
     relay_response_mac(pkt, nonce, digest);
 
+    int cmp = memcmp(mac, digest, RESPONSE_MAC_LEN);
     if (relay_debug(instance)) {
-        fprintf(stderr, "Received AMT Membership Change nonce %u received "
-                        "mac %02x%02x%02x%02x%02x%02x true mac "
-                        "%02x%02x%02x%02x%02x%02x\n",
+        if (cmp) {
+            fprintf(stderr, "Received AMT Membership Change nonce %u "
+                    "received mac %02x%02x%02x%02x%02x%02x (bad: expected="
+                    "%02x%02x%02x%02x%02x%02x)\n",
               nonce, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
               digest[0], digest[1], digest[2], digest[3], digest[4],
               digest[5]);
+        } else {
+            fprintf(stderr, "Received AMT Membership Change nonce %u "
+                    "received mac %02x%02x%02x%02x%02x%02x (matched)\n",
+              nonce, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
     }
-    return memcmp(mac, digest, RESPONSE_MAC_LEN);
+    if (cmp) {
+        // cisco gateway is giving the wrong last 2 bytes in version:
+        /*
+         * Cisco IOS XE Software, Version 03.16.04a.S - Extended Support Release
+         * Cisco IOS Software, CSR1000V Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 15.5(3)S4a, RELEASE SOFTWARE (fc1)
+         * Compiled Tue 04-Oct-16 07:07 by mcpre
+         */
+        // csr1000v-universalk9.03.17.03.S.156-1.S3-std.qcow2
+        // md5: d3f8ee319643bde1be817a34a2d03f56
+        cmp = memcmp(mac, digest, RESPONSE_MAC_LEN-2);
+        if (!cmp && relay_debug(instance)) {
+            fprintf(stderr, "Cisco compatibility mode: first 4 mac bytes "
+                    "matched, so it's passed\n");
+        }
+    }
+    return cmp;
 }
 
 /*
@@ -979,16 +1001,38 @@ relay_send_advertisement(packet* pkt, u_int32_t nonce, prefix_t* from)
 }
 
 /* this function generates header checksums */
+static uint16_t
+iov_csum(struct iovec* iov, unsigned int iov_len)
+{
+    unsigned int iov_idx;
+    unsigned int data_idx = 0;
+    unsigned long sum = 0;
+    for (iov_idx = 0; iov_idx < iov_len; ++iov_idx) {
+        unsigned int cur_len = iov[iov_idx].iov_len;
+        const uint8_t *cur_data = (const uint8_t*)iov[iov_idx].iov_base;
+        unsigned int cur_idx;
+        for (cur_idx = 0; cur_idx < cur_len;
+                ++cur_idx, ++data_idx, ++cur_data) {
+            if (data_idx % 2 == 1) {
+                sum += ((unsigned long)(*cur_data)) << 8;
+            } else {
+                sum += (unsigned long)(*cur_data);
+            }
+        }
+    }
+    while (sum>>16) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return ~sum;
+}
+
 static unsigned short
 csum(unsigned short* buf, int nwords)
 {
-    unsigned long sum;
-    for (sum = 0; nwords > 0; nwords--) {
-        sum += *buf++;
-    }
-    sum = (sum >> 16) + (sum & 0xffff);
-    sum += (sum >> 16);
-    return ~sum;
+    struct iovec iovecs[1];
+    iovecs[0].iov_base = buf;
+    iovecs[0].iov_len = nwords*2;
+    return iov_csum(&iovecs[0], 1);
 }
 
 static int
@@ -1429,27 +1473,29 @@ relay_packet_enq(relay_instance* instance, packet* pkt)
     /*
      * Place the received packet on the input queue for processing
      *
-     * Data packets have the highest priority to reduce packet forwarding
-     * latency.
+     * Membership reports have the highest priority to reduce
+     * join/leave latency (and so that leaves aren't dropped in
+     * favor of data).
      *
-     * Next, IGMP joins/leaves to reduce join/leave latency
+     * Data packets have the next highest priority to reduce packet
+     * forwarding latency.
      *
      * Last, Discovery messages are processed since they aren't time
      * sensitive
      */
     switch (pkt->pkt_amt) {
-        case AMT_MCAST_DATA:
+        case AMT_REQUEST:
+        case AMT_MEMBERSHIP_QUERY:
+        case AMT_MEMBERSHIP_CHANGE:
             pkt->pkt_queue = HIGH;
+            break;
+
+        case AMT_MCAST_DATA:
+            pkt->pkt_queue = MEDIUM;
             gettimeofday(&time_stamp, NULL);
             pkt->enq_time =
                   time_stamp.tv_sec * 1000000 + time_stamp.tv_usec;
             instance->stats.mcast_data_recvd++;
-            break;
-
-        case AMT_REQUEST:
-        case AMT_MEMBERSHIP_QUERY:
-        case AMT_MEMBERSHIP_CHANGE:
-            pkt->pkt_queue = MEDIUM;
             break;
 
         case AMT_RELAY_DISCOVERY:
@@ -1489,7 +1535,7 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
 {
     u_int8_t namebuf[NAMELEN];
     u_int8_t ctlbuf[CTLLEN];
-    struct iovec iovec;
+    struct iovec iovecs[1];
     struct msghdr msghdr;
     struct sockaddr* srcsock;
     struct sockaddr_in* in;
@@ -1497,18 +1543,18 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
     int len, rc;
     struct cmsghdr* cmsgp;
 
-    bzero(&iovec, sizeof(iovec));
+    bzero(&iovecs, sizeof(iovecs));
     bzero(&msghdr, sizeof(msghdr));
 
     msghdr.msg_name = namebuf;
     msghdr.msg_namelen = NAMELEN;
-    msghdr.msg_iov = &iovec;
-    msghdr.msg_iovlen = 1;
+    msghdr.msg_iov = &iovecs[0];
+    msghdr.msg_iovlen = sizeof(iovecs)/sizeof(iovecs[0]);
     msghdr.msg_control = ctlbuf;
     msghdr.msg_controllen = CTLLEN;
 
-    iovec.iov_base = &pkt->pkt_data[offset];
-    iovec.iov_len = BUFFER_SIZE - offset;
+    iovecs[0].iov_base = &pkt->pkt_data[offset];
+    iovecs[0].iov_len = BUFFER_SIZE - offset;
 
     rc = recvmsg(fd, &msghdr, 0);
     if (rc < 0) {
@@ -1633,19 +1679,64 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
                     fprintf(stderr, "ignored cmsg_type=%d\n", cmsgp->cmsg_type);
                 }
             }
-            /*
-            // please god tell me the above is nearly portable now...
-#ifdef BSD
-#else  // BSD
-            if (cmsgp->cmsg_level == IPPROTO_IP) {
-                switch (cmsgp->cmsg_type) {
-                default:
-                    fprintf(stderr, "ignored ncmsg_type=%d\n", cmsgp->cmsg_type);
-                }
-            }
-#endif  // BSD
-*/
             cmsgp = CMSG_NXTHDR(&msghdr, cmsgp);
+        }
+
+        // since we receive packets from local machine in our deployment,
+        // we have to build the internal checksums, they're no good.
+        //
+        // TBD: make this a command-line option?
+        // when accepting packets from external interface, we could
+        // pass through without computing because only good checksums
+        // will be accepted by the nic.
+        unsigned int compute_checksums = 1;
+        if (compute_checksums) {
+            struct ip* iph;
+            iph = (struct ip*)(&pkt->pkt_data[offset]);
+            if (iph->ip_hl < 5 || iph->ip_hl*4 > pkt->pkt_len - offset) {
+                fprintf(stderr, "warning: ignoring pkt: bad ip header length (%u) in data packet len %u\n", iph->ip_hl, pkt->pkt_len);
+                return rc;
+            }
+            if (ntohs(iph->ip_len) > pkt->pkt_len - offset) {
+                fprintf(stderr, "warning: ignoring pkt: bad ip length (%u=0x%04x) in data packet len %u\n", ntohs(iph->ip_len), ntohs(iph->ip_len), pkt->pkt_len);
+                return rc;
+            }
+            if (ntohs(iph->ip_len) < iph->ip_hl*4 + sizeof(struct udphdr)) {
+                fprintf(stderr, "warning: ignoring pkt: ip length (%u) in packet len %u with iphdrlen %u can't fit udp\n", ntohs(iph->ip_len), pkt->pkt_len, (unsigned int)(iph->ip_hl*4));
+                return rc;
+            }
+            iph->ip_sum = 0;
+            iph->ip_sum = csum((unsigned short*)iph,
+                               (4*iph->ip_hl)/ 2);
+
+            struct udphdr* uph = (struct udphdr*)
+                (((u_int8_t*)iph)+iph->ip_hl*4);
+            if (iph->ip_hl * 4 + ntohs(uph->uh_ulen) >
+                    ntohs(iph->ip_len) || ntohs(uph->uh_ulen) < 8) {
+                fprintf(stderr, "warning: ignoring bad udp header length (%u=0x%04x) in ip len %u (iphdr %u)\n", ntohs(uph->uh_ulen), ntohs(uph->uh_ulen), ntohs(iph->ip_len), (unsigned int)(iph->ip_hl*4));
+                return rc;
+            }
+
+            uph->uh_sum = 0;
+            /*
+            // 2 problems with this bit:
+            // a. it should just be 0, the udp checksum is optional.
+            // b. the iov_csum is coming up wrong here for 125-payload pkts
+            uint8_t pshdr_v[4];
+            pshdr_v[0] = 0;
+            pshdr_v[1] = iph->ip_p;
+            pshdr_v[2] = uph->uh_ulen >> 8;
+            pshdr_v[3] = (uph->uh_ulen) & 0xff;
+            struct iovec iov[3];
+            unsigned int niovs = sizeof(iov)/sizeof(iov[0]);
+            iov[0].iov_base = ((uint8_t*)iph)+12;
+            iov[0].iov_len = 8;
+            iov[1].iov_base = pshdr_v;
+            iov[1].iov_len = 4;
+            iov[2].iov_base = uph;
+            iov[2].iov_len = ntohs(uph->uh_ulen);
+            uph->uh_sum = iov_csum(iov, niovs);
+            */
         }
     }
     break;
