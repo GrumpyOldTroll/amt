@@ -33,7 +33,7 @@
 static const char __attribute__((unused)) id[] =
       "@(#) $Id: //sandbox/pyang/amt/relay/recv.c#12 $";
 
-#include <sys/errno.h>
+#include <errno.h>
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>

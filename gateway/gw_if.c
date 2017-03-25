@@ -30,7 +30,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/errno.h>
+#include <errno.h>
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/types.h>
