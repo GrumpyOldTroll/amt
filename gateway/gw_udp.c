@@ -33,7 +33,7 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <sys/errno.h>
+#include <errno.h>
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>

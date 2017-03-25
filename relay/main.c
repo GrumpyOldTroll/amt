@@ -48,7 +48,7 @@ static const char __attribute__((unused)) id[] =
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/errno.h>
+#include <errno.h>
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
@@ -183,8 +183,10 @@ socket_set_blocking(int s)
 } */
 
 static void
-icmp_recv(int fd, short __unused flags, void* uap)
+icmp_recv(int fd, short flags, void* uap)
 {
+    (void)fd;
+    (void)flags;
     relay_instance* instance = (relay_instance*)uap;
     struct sockaddr_in addr;
     char buf[1024];
@@ -275,8 +277,10 @@ relay_icmp_init(relay_instance* instance)
 }
 
 static void
-dns_reply(int fd, short __unused flags, void* uap)
+dns_reply(int fd, short flags, void* uap)
 {
+    (void)fd;
+    (void)flags;
     char response[100], str_avg_qdelay[100];
     int nbytes;
     relay_instance* instance = (relay_instance*)uap;
@@ -330,8 +334,10 @@ dns_reply(int fd, short __unused flags, void* uap)
 }
 
 static void
-dns_connect(int fd, short __unused flags, void* uap)
+dns_connect(int fd, short flags, void* uap)
 {
+    (void)fd;
+    (void)flags;
     struct sockaddr_in dns_addr;
     socklen_t addrlen = sizeof(dns_addr);
     relay_instance* instance = (relay_instance*)uap;
@@ -436,6 +442,7 @@ relay_event_init(relay_instance* instance)
 static void
 relay_mcast_info(int signum)
 {
+    (void)signum;
     relay_instance* instance;
 
     instance = TAILQ_FIRST(&instance_head);
@@ -455,6 +462,7 @@ relay_mcast_info(int signum)
 static void
 relay_signal_init(relay_instance* instance)
 {
+    (void)instance;
     struct sigaction sa;
 
     sa.sa_handler = SIG_IGN;

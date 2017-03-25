@@ -33,7 +33,7 @@
 static const char __attribute__((unused)) id[] =
       "@(#) $Id: //sandbox/pyang/amt/relay/recv.c#12 $";
 
-#include <sys/errno.h>
+#include <errno.h>
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
@@ -549,7 +549,7 @@ mld_decode(relay_instance* instance,
     pktlen += sizeof(*ip); /* compensation */
 
 #define MLD_MIMLEN (sizeof(struct mldv2_report) + sizeof(struct mldv2_record))
-    if (pktlen < MLD_MIMLEN) {
+    if (pktlen < (int)MLD_MIMLEN) {
         instance->stats.mld_short_bad++;
         return MEMBERSHIP_ERROR;
     }
@@ -627,11 +627,11 @@ relay_discovery_nonce_extract(packet* pkt)
     len = pkt->pkt_len;
     cp = (u_int8_t*)pkt->pkt_data;
 
-    if (len > sizeof(u_int32_t)) {
+    if (len > (int)sizeof(u_int32_t)) {
         cp += sizeof(u_int32_t);
         len -= sizeof(u_int32_t);
 
-        if (len >= sizeof(u_int32_t)) {
+        if (len >= (int)sizeof(u_int32_t)) {
             nonce = get_long(cp);
             len -= sizeof(u_int32_t);
 
@@ -659,11 +659,11 @@ relay_gw_nonce_extract(packet* pkt)
     len = pkt->pkt_len;
     cp = (u_int8_t*)pkt->pkt_data;
 
-    if (len > sizeof(u_int32_t)) {
+    if (len > (int)sizeof(u_int32_t)) {
         cp += sizeof(u_int32_t);
         len -= sizeof(u_int32_t);
 
-        if (len >= sizeof(u_int32_t)) {
+        if (len >= (int)sizeof(u_int32_t)) {
             nonce = get_long(cp);
             len -= sizeof(u_int32_t);
 
@@ -764,6 +764,7 @@ relay_select_src_addr(relay_instance* instance,
       u_int16_t dport,
       prefix_t** srcp)
 {
+    (void)instance;
     int s, rc;
     socklen_t len = 0;
     struct sockaddr_in sin;
@@ -1215,6 +1216,8 @@ relay_send_membership_query(packet* pkt, u_int32_t nonce, u_int8_t* digest)
 static void
 relay_packet_deq(int fd, short event, void* uap)
 {
+    (void)fd;
+    (void)event;
     membership_type mt;
     relay_instance* instance = (relay_instance*)uap;
     packet_queue_pri queue;
@@ -1744,7 +1747,7 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
     case AF_INET6: {
         in6 = (struct sockaddr_in6*)srcsock;
         len = msghdr.msg_namelen;
-        if (len < sizeof(*in6)) {
+        if (len < (int)sizeof(*in6)) {
             return rc;
         }
 
@@ -1788,8 +1791,9 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
 }
 
 void
-relay_instance_read(int fd, short __unused flags, void* uap)
+relay_instance_read(int fd, short flags, void* uap)
 {
+    (void)flags;
     int len;
     relay_instance* instance;
 
@@ -1882,6 +1886,7 @@ relay_memory_print(void* arg,
 void
 relay_show_memory(relay_instance* instance, struct evbuffer* buf)
 {
+    (void)instance;
     evbuffer_add_printf(buf, "Type\tSize\tAlloced\tFreed\n");
     mem_type_show(relay_memory_print, buf);
 }
@@ -1987,6 +1992,8 @@ writecb(struct bufferevent* bev, void* uap)
 void
 errorcb(struct bufferevent* bev, short what, void* uap)
 {
+    (void)bev;
+    (void)what;
     url_request* url;
 
     url = (url_request*)uap;
@@ -1995,8 +2002,9 @@ errorcb(struct bufferevent* bev, short what, void* uap)
 }
 
 void
-relay_accept_url(int fd, short __unused flags, void* uap)
+relay_accept_url(int fd, short flags, void* uap)
 {
+    (void)flags;
     int newfd;
     socklen_t salen;
     char str[MAX_ADDR_STRLEN];
@@ -2211,8 +2219,10 @@ relay_socket_init(sgnode* sg)
 }
 
 void
-relay_socket_read(int fd, short __unused flags, void* uap)
+relay_socket_read(int fd, short flags, void* uap)
 {
+    (void)fd;
+    (void)flags;
     int rc;
     relay_instance* instance = (relay_instance*)uap;
 
