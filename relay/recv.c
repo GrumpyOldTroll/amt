@@ -1684,63 +1684,6 @@ relay_packet_read(int fd, int af_family, packet* pkt, u_int offset)
             }
             cmsgp = CMSG_NXTHDR(&msghdr, cmsgp);
         }
-
-        // since we receive packets from local machine in our deployment,
-        // we have to build the internal checksums, they're no good.
-        //
-        // TBD: make this a command-line option?
-        // when accepting packets from external interface, we could
-        // pass through without computing because only good checksums
-        // will be accepted by the nic.
-        unsigned int compute_checksums = 1;
-        if (compute_checksums) {
-            struct ip* iph;
-            iph = (struct ip*)(&pkt->pkt_data[offset]);
-            if (iph->ip_hl < 5 || iph->ip_hl*4 > pkt->pkt_len - offset) {
-                fprintf(stderr, "warning: ignoring pkt: bad ip header length (%u) in data packet len %u\n", iph->ip_hl, pkt->pkt_len);
-                return rc;
-            }
-            if (ntohs(iph->ip_len) > pkt->pkt_len - offset) {
-                fprintf(stderr, "warning: ignoring pkt: bad ip length (%u=0x%04x) in data packet len %u\n", ntohs(iph->ip_len), ntohs(iph->ip_len), pkt->pkt_len);
-                return rc;
-            }
-            if (ntohs(iph->ip_len) < iph->ip_hl*4 + sizeof(struct udphdr)) {
-                fprintf(stderr, "warning: ignoring pkt: ip length (%u) in packet len %u with iphdrlen %u can't fit udp\n", ntohs(iph->ip_len), pkt->pkt_len, (unsigned int)(iph->ip_hl*4));
-                return rc;
-            }
-            iph->ip_sum = 0;
-            iph->ip_sum = csum((unsigned short*)iph,
-                               (4*iph->ip_hl)/ 2);
-
-            struct udphdr* uph = (struct udphdr*)
-                (((u_int8_t*)iph)+iph->ip_hl*4);
-            if (iph->ip_hl * 4 + ntohs(uph->uh_ulen) >
-                    ntohs(iph->ip_len) || ntohs(uph->uh_ulen) < 8) {
-                fprintf(stderr, "warning: ignoring bad udp header length (%u=0x%04x) in ip len %u (iphdr %u)\n", ntohs(uph->uh_ulen), ntohs(uph->uh_ulen), ntohs(iph->ip_len), (unsigned int)(iph->ip_hl*4));
-                return rc;
-            }
-
-            uph->uh_sum = 0;
-            /*
-            // 2 problems with this bit:
-            // a. it should just be 0, the udp checksum is optional.
-            // b. the iov_csum is coming up wrong here for 125-payload pkts
-            uint8_t pshdr_v[4];
-            pshdr_v[0] = 0;
-            pshdr_v[1] = iph->ip_p;
-            pshdr_v[2] = uph->uh_ulen >> 8;
-            pshdr_v[3] = (uph->uh_ulen) & 0xff;
-            struct iovec iov[3];
-            unsigned int niovs = sizeof(iov)/sizeof(iov[0]);
-            iov[0].iov_base = ((uint8_t*)iph)+12;
-            iov[0].iov_len = 8;
-            iov[1].iov_base = pshdr_v;
-            iov[1].iov_len = 4;
-            iov[2].iov_base = uph;
-            iov[2].iov_len = ntohs(uph->uh_ulen);
-            uph->uh_sum = iov_csum(iov, niovs);
-            */
-        }
     }
     break;
 
@@ -2229,11 +2172,13 @@ relay_socket_read(int fd, short flags, void* uap)
     do {
         packet* pkt = relay_pkt_get(instance);
 
-        rc = relay_packet_read(fd, instance->tunnel_af, pkt, 2);
+        unsigned int offset = 2;
+        rc = relay_packet_read(fd, instance->tunnel_af, pkt, offset);
         if (rc <= 0) {
             relay_pkt_free(pkt);
             break;
         }
+
         // AMT data: https://tools.ietf.org/html/rfc7450#section-5.1.6
         uint8_t* cp = pkt->pkt_data;
         *cp = 6;
@@ -2242,10 +2187,70 @@ relay_socket_read(int fd, short flags, void* uap)
         case AF_INET:
         {
             struct ip* iph = (struct ip*)(cp + 2);
+
             prefix_free(pkt->pkt_dst);
             prefix_free(pkt->pkt_src);
             pkt->pkt_dst = prefix_build(AF_INET, &iph->ip_dst, INET_HOST_LEN);
             pkt->pkt_src = prefix_build(AF_INET, &iph->ip_src, INET_HOST_LEN);
+
+            // since we receive packets from local machine in our deployment,
+            // we have to build the internal checksums, they're no good.
+            //
+            // TBD: make this a command-line option?
+            // when accepting packets from external interface, we could
+            // pass through without computing because only good checksums
+            // will be accepted by the nic.
+            unsigned int compute_checksums = 1;
+            if (compute_checksums) {
+                if (iph->ip_hl < 5 || iph->ip_hl*4 > pkt->pkt_len - offset) {
+                    fprintf(stderr, "warning: ignoring pkt: bad ip header length (%u) in data packet len %u\n", iph->ip_hl, pkt->pkt_len);
+                    relay_pkt_free(pkt);
+                    continue;
+                }
+                if (ntohs(iph->ip_len) > pkt->pkt_len - offset) {
+                    fprintf(stderr, "warning: ignoring pkt: bad ip length (%u=0x%04x) in data packet len %u\n", ntohs(iph->ip_len), ntohs(iph->ip_len), pkt->pkt_len);
+                    relay_pkt_free(pkt);
+                    continue;
+                }
+                if (ntohs(iph->ip_len) < iph->ip_hl*4 + sizeof(struct udphdr)) {
+                    fprintf(stderr, "warning: ignoring pkt: ip length (%u) in packet len %u with iphdrlen %u can't fit udp\n", ntohs(iph->ip_len), pkt->pkt_len, (unsigned int)(iph->ip_hl*4));
+                    relay_pkt_free(pkt);
+                    continue;
+                }
+                iph->ip_sum = 0;
+                iph->ip_sum = csum((unsigned short*)iph,
+                                   (4*iph->ip_hl)/ 2);
+
+                struct udphdr* uph = (struct udphdr*)
+                    (((u_int8_t*)iph)+iph->ip_hl*4);
+                if (iph->ip_hl * 4 + ntohs(uph->uh_ulen) >
+                        ntohs(iph->ip_len) || ntohs(uph->uh_ulen) < 8) {
+                    fprintf(stderr, "warning: ignoring bad udp header length (%u=0x%04x) in ip len %u (iphdr %u)\n", ntohs(uph->uh_ulen), ntohs(uph->uh_ulen), ntohs(iph->ip_len), (unsigned int)(iph->ip_hl*4));
+                    relay_pkt_free(pkt);
+                    continue;
+                }
+
+                uph->uh_sum = 0;
+                /*
+                // 2 problems with this bit:
+                // a. it should just be 0, the udp checksum is optional.
+                // b. the iov_csum is coming up wrong here for 125-payload pkts
+                uint8_t pshdr_v[4];
+                pshdr_v[0] = 0;
+                pshdr_v[1] = iph->ip_p;
+                pshdr_v[2] = uph->uh_ulen >> 8;
+                pshdr_v[3] = (uph->uh_ulen) & 0xff;
+                struct iovec iov[3];
+                unsigned int niovs = sizeof(iov)/sizeof(iov[0]);
+                iov[0].iov_base = ((uint8_t*)iph)+12;
+                iov[0].iov_len = 8;
+                iov[1].iov_base = pshdr_v;
+                iov[1].iov_len = 4;
+                iov[2].iov_base = uph;
+                iov[2].iov_len = ntohs(uph->uh_ulen);
+                uph->uh_sum = iov_csum(iov, niovs);
+                */
+            }
         }
         break;
         case AF_INET6:
