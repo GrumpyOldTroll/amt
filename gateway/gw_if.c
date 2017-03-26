@@ -43,7 +43,9 @@
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
+#ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
+#endif
 #include <sys/time.h>
 #include <time.h>
 
