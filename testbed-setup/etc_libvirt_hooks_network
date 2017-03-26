@@ -1,0 +1,15 @@
+#!/bin/sh
+
+/usr/bin/logger "$(whoami): /etc/libvirt/hooks/network $*"
+
+name=$1
+action=$2
+
+if [ "$name" = "between-net" -a "$action" = "started" ]; then
+        # a bit convoluted to get the error output dumped to my log if something's wrong...
+        tmpfile=/tmp/hooks_log.log
+        /bin/sh -x -c 'echo "0" | tee /sys/devices/virtual/net/virbr1/bridge/multicast_snooping > /dev/null' 2>&1 | cat >> $tmpfile
+        /bin/sh -x -c 'echo "2" | tee /sys/devices/virtual/net/virbr1/bridge/multicast_router > /dev/null' 2>&1 | cat >> $tmpfile
+        /usr/bin/logger -f $tmpfile
+fi
+

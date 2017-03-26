@@ -1,0 +1,73 @@
+# VirtualBox with a NAT interface and a host-only interface, 20gb disk
+# $ shasum -a 256 ~/Downloads/ubuntu-16.04-server-amd64.iso 
+# b8b172cbdf04f5ff8adc8c2c1b4007ccf66f00fc6a324a6da6eba67de71746f6  ubuntu-16.04-server-amd64.iso
+# username/password: amt/amt
+# central time zone (chicago)
+# full disk lvm
+# no auto-updates
+# openssh+standard system utilities
+# grub installed
+
+# after boot:
+sudo bash -x -c "apt update && apt dist-upgrade -y && apt autoremove -y"
+sudo visudo
+# (adding: amt=NOPASSWD:ALL)
+sudo /etc/network/interfaces
+#adding host-only: auto enp0s8+iface enp0s8 inet static+
+#address,netmask,broadcast for 192.168.56.56/24
+#added my id_rsa.pub to .ssh/authorized_keys
+shutdown -r now
+
+# Build system here:
+# https://wiki.openwrt.org/doc/howto/buildroot.exigence
+sudo apt install git-core build-essential libssl-dev libncurses5-dev unzip gawk zlib1g-dev subversion mercurial
+git clone -b chaos_calmer git://github.com/openwrt/openwrt.git
+cd openwrt
+./scripts/feeds update -a
+./scripts/feeds install -a
+
+#Build instructions here:
+#https://wiki.openwrt.org/doc/howto/build
+make menuconfig
+# The router I brought is described here, yours may vary:
+#   https://wiki.openwrt.org/toh/hwdata/netgear/netgear_wndr3700_v3
+# Target system: Broadcom BCM47xx/53xx (MIPS)
+# Subtarget: MIPS 74K
+# Target Profile: b43
+#   unclear to me whether it might work better with wl, but I went b43:
+#    https://help.ubuntu.com/community/WifiDocs/Driver/bcm43xx
+#    http://askubuntu.com/questions/259469/cant-get-bcm4331-wireless-working-right
+
+# non-defaults that I turned on:
+# Package the OpenWRT-based Toolchain
+# Libraries/libevent2
+# LuCI/Collections/luci
+# Network/Routing/
+#    ip-full
+#    mcproxy
+#    tc
+# Network/
+#    iftop
+#    tcpdump
+make tools/install && make toolchain/install
+export PATH="$(pwd)/staging_dir/host:$(pwd)/staging_dir/toolchain-mipsel_74kc+dsp2_gcc-4.8-linaro_uClibc-0.9.33.2/bin:$PATH"
+# again, your toolchain path may vary...
+
+vi ~/.bashrc
+# add: export PATH="$(pwd)/staging_dir/host:$(pwd)/staging_dir/toolchain-mipsel_74kc+dsp2_gcc-4.8-linaro_uClibc-0.9.33.2/bin:$PATH"
+make world
+
+# grab current sources of relevant projects
+cd ~
+git clone https://github.com/GrumpyOldTroll/amt.git
+git clone https://github.com/GrumpyOldTroll/amt-openwrt.git
+git clone https://github.com/GrumpyOldTroll/iperf-ssm.git
+
+ln -s ~/amt-openwrt ~/openwrt/package/network/utils/amt
+cd openwrt
+make menuconfig
+(select new amt under Network/)
+make -j1 package/network/utils/amt/install V=s
+
+see "installing-and-running.txt" for next steps.
+

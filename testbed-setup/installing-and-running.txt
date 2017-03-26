@@ -1,0 +1,55 @@
+super useful note for debugging:
+In openwrt build environment, after the first time you make:
+make -j1 package/network/utils/amt/install V=s
+
+you will have a directory under build_dir:
+  ~/openwrt$ ls -d build_dir/*/*amt*
+     build_dir/target-mipsel_74kc+dsp2_uClibc-0.9.33.2/amt-openwrt
+
+You can edit files under there, and they'll be built instead of
+re-fetching the .tgz. Plan on them getting blown away later, so keep
+backups.
+
+
+make -j1 package/network/utils/amt/install V=s
+IPKF=$(find bin -name "*amt*")
+echo $IPKF
+# bin/brcm47xx/packages/base/amt_openwrt-f182c6080c47c8530f451c5846d72b7e9fe39abc_brcm47xx.ipk
+scp $IPKF root@192.168.1.1:amt_openwrt.ipk
+ssh root@192.168.1.1 opkg install amt_openwrt.ipk
+
+
+# receiver:
+sudo amt/gateway/amtgwd -a 192.52.193.1 -s 10.4.4.0/24 -d -n &
+iperf-ssm/src/iperf --server --udp --single_udp --bind 232.10.5.91 --source 10.5.5.91 --interface tun0 --interval 1 --len 125
+sudo tcpdump -i tun0 -n
+
+# that sees packets, with cisco CSR1000v as AMT relay, just upstream of
+# my openwrt router. likewise, if my receiver is plugged in upstream of
+# the openwrt router, I receive packets from that iperf call, so they're
+# forwarded from the CSR1000v.
+# note: at time of this writing, downstream from amtgwd iperf-ssm does
+# NOT receive packets on socket, but raw IP packets are visible on tun0
+# in tcpdump. Hopefully will be debugged before long.
+
+# kill those, and run the same again but with .2 instead of .1
+# that doesn't work, as expected (because nobody's listening on that ip)
+# one day when this has the init script and a config file, default should
+# be to listen on 192.52.193.1
+# (c.f. https://tools.ietf.org/html/rfc7450#section-7.1)
+
+# then run on openwrt:
+ip addr add 192.52.193.2/32 dev br-lan
+/sbin/amtrelayd -n inet -l inet -c eth0.2 -s 192.168.1.1 -q1 -d -a "192.52.193.2/32" -g 12222
+ where:
+   eth0.2 is the upstream interface with an IP address
+   192.52.193.2 is the downstream AMT address
+   br-lan is a downstream gateway interface
+   upstream can receive native multicast from 10.5.5.91
+   iperf is running on an upstream machine at 10.5.5.91:
+       i=0;while true; do let i=$((i+1)); echo "$i: $(date)"; ./iperf-ssm/src/iperf --client 232.10.5.91 --udp --ttl 30 --bandwidth 1K --bind 10.5.5.91 --len 125 --time 900; sleep 1; done
+
+# at time of this writing, I'm still debugging this, but in theory it
+# should work same as the cisco CSR1000v relay. :/
+
+

@@ -1,0 +1,50 @@
+# If the full testbed seems too complicated, there's some debugging and
+# testing of amtrelayd and amtgwd in a fully local setup, with only
+# one machine and no network activity. This is a fine way to run under
+# gdb, if you can reproduce your problem.
+
+# setup chain:
+sudo ip netns add msnd
+sudo ip netns add mrelay
+sudo ip netns add mrcv
+
+sudo ip link add dev veth0 type veth peer name veth1
+sudo ip link set dev veth0 netns msnd
+sudo ip link set dev veth1 netns mrelay
+
+sudo ip link add dev veth2 type veth peer name veth3
+sudo ip link set dev veth2 netns mrelay
+sudo ip link set dev veth3 netns mrcv
+
+sudo ip netns exec msnd     ip link set dev veth0 up
+sudo ip netns exec mrelay   ip link set dev veth1 up
+sudo ip netns exec mrelay   ip link set dev veth2 up
+sudo ip netns exec mrcv     ip link set dev veth3 up
+
+sudo ip netns exec msnd     ip addr add dev veth0 10.2.2.1/24 brd +
+sudo ip netns exec mrelay   ip addr add dev veth1 10.2.2.2/24 brd +
+sudo ip netns exec mrelay   ip addr add dev veth2 10.3.3.1/24 brd +
+sudo ip netns exec mrcv     ip addr add dev veth3 10.3.3.2/24 brd +
+sudo ip netns exec mrcv     ip route add default dev veth3
+
+
+# run as needed:
+sudo ip netns exec msnd unbuffer iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900 &
+
+
+sudo ip netns exec mrelay unbuffer amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" -g 12222 &
+
+
+sudo ip netns exec mrcv unbuffer amt/gateway/amtgwd -a 10.3.3.1 -s 10.4.4.0/24 -d -n &
+
+sudo ip netns exec mrcv unbuffer iperf-ssm/src/iperf --server --udp --single_udp --bind 232.10.10.10 --source 10.2.2.1 --interface tun0 --interval 1 --len 125 &
+
+# Useful places to capture:
+# sudo ip netns exec msnd unbuffer tcpdump -i veth0 -n
+# sudo ip netns exec relay unbuffer tcpdump -i veth1 -n
+# sudo ip netns exec relay unbuffer tcpdump -i veth2 -n
+# sudo ip netns exec mrcv unbuffer tcpdump -i veth3 -n
+# sudo ip netns exec mrcv unbuffer tcpdump -i tun0 -n
+
+
+
