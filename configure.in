@@ -13,7 +13,7 @@ AC_PROG_RANLIB
 
 # Checks for header files.
 AC_HEADER_STDC
-AC_CHECK_HEADERS([fcntl.h stdlib.h string.h stddef.h sys/socket.h unistd.h netinet/in.h sys/timers.h sys/queue.h])
+AC_CHECK_HEADERS([arpa/inet.h assert.h event.h fcntl.h getopt.h ifaddrs.h net/bpf.h netdb.h net/if_dl.h net/if.h netinet6/mld6.h netinet/icmp6.h netinet/if_ether.h netinet/in.h netinet/in_systm.h netinet/ip6.h netinet/in_systm.h netinet/ip6.h netinet/ip.h netinet/ip_icmp.h netinet/udp.h signal.h stdarg.h stddef.h stdint.h stdio.h stdlib.h string.h sys/errno.h sys/ioctl.h sys/param.h sys/queue.h sys/socket.h sys/time.h sys/types.h sys/uio.h unistd.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
@@ -33,7 +33,6 @@ fi
 AC_CHECK_FUNCS([strerror bzero socket])
 
 # Checks for libraries.
-AC_CHECK_LIB([pcap], [pcap_open_live])
 AC_CHECK_LIB([event], [event_init])
 AC_CHECK_LIB([md], [MD5Init], [], [ my_want_md5=yes ])
 

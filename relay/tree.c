@@ -457,6 +457,8 @@ icmp_delete_gw(relay_instance* instance, prefix_t* pfx)
 void
 idle_delete(int fd, short event, void* arg)
 {
+    (void)fd;
+    (void)event;
     gw_t* gw = (gw_t*)arg;
     sgnode* sg;
     relay_instance* instance;
@@ -890,7 +892,7 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
                                     &(gw->gw_src), str3, MAX_ADDR_STRLEN));
                     return;
             }
-        } else if (rc != pkt->pkt_len) {
+        } else if ((unsigned int)rc != pkt->pkt_len) {
             if (relay_debug(instance))
                 fprintf(stderr,
                       "forward packet short write %d out of %d to %s\n", rc,
