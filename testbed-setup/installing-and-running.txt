@@ -32,24 +32,92 @@ sudo tcpdump -i tun0 -n
 # NOT receive packets on socket, but raw IP packets are visible on tun0
 # in tcpdump. Hopefully will be debugged before long.
 
-# kill those, and run the same again but with .2 instead of .1
+# kill those, and run the same again but with 192.52.193.2 instead of
+# 192.52.193.1.
 # that doesn't work, as expected (because nobody's listening on that ip)
-# one day when this has the init script and a config file, default should
-# be to listen on 192.52.193.1
+# (note: this is just for testing. when this eventually has an init
+# script and a config file, default should be to listen on 192.52.193.1)
 # (c.f. https://tools.ietf.org/html/rfc7450#section-7.1)
 
 # then run on openwrt:
 ip addr add 192.52.193.2/32 dev br-lan
-/sbin/amtrelayd -n inet -l inet -c eth0.2 -s 192.168.1.1 -q1 -d -a "192.52.193.2/32" -g 12222
+/sbin/amtrelayd -n inet -l inet -c eth0.2 -s 192.168.1.1 -q1 -a "192.52.193.2/32" -g 12222
  where:
    eth0.2 is the upstream interface with an IP address
-   192.52.193.2 is the downstream AMT address
-   br-lan is a downstream gateway interface
+   192.52.193.2 is the AMT address to listen for downstream gateway
+        discovery
+   br-lan is a downstream interface, where gateways will connect.
    upstream can receive native multicast from 10.5.5.91
    iperf is running on an upstream machine at 10.5.5.91:
        i=0;while true; do let i=$((i+1)); echo "$i: $(date)"; ./iperf-ssm/src/iperf --client 232.10.5.91 --udp --ttl 30 --bandwidth 1K --bind 10.5.5.91 --len 125 --time 900; sleep 1; done
 
-# at time of this writing, I'm still debugging this, but in theory it
-# should work same as the cisco CSR1000v relay. :/
+
+# Issues a join after running gateway receiver:
+/sbin/amtrelayd -n inet -l inet -c eth0.2 -s 192.168.1.1 -q1 -d -a "192.52.193.1/32" -g 12222
+
+# Does not issue a join after running gateway receiver (had to use the .2):
+/sbin/amtrelayd -n inet -l inet -c eth0 -s 192.168.1.1 -q1 -d -a "192.52.193.1/32" -g 12222
+
+# You also have to turn off the firewall or configure it to pass 232.x/8.
+# (Or you could make it 224.0.0.0/4 to pass all IPv4 multicast.)
+cat >> /etc/config/firewall <<EOF
+
+config rule
+        option name             Allow-SSMulticast
+        option src              wan
+        option proto            udp
+        option family           ipv4
+        option dest_ip          232.0.0.0/8
+        option target           ACCEPT
+EOF
+# (or /etc/init.d/firewall stop, though I think the upstream routers
+#  confused openwrt in my testbed after a while, I had to reboot)
+
+Then it worked for me.
+
+My openwrt config (different routers look different):
+br-lan    Link encap:Ethernet  HWaddr 2C:B0:5D:42:DB:9F
+          inet addr:192.168.1.1  Bcast:192.168.1.255  Mask:255.255.255.0
+          inet6 addr: fe80::2eb0:5dff:fe42:db9f/64 Scope:Link
+          inet6 addr: fdb6:a8f6:f79b::1/60 Scope:Global
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:37892 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:111371 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0
+          RX bytes:5288311 (5.0 MiB)  TX bytes:144819668 (138.1 MiB)
+
+eth0      Link encap:Ethernet  HWaddr 2C:B0:5D:42:DB:9F
+          inet6 addr: fe80::2eb0:5dff:fe42:db9f/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:0 errors:0 dropped:6 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+          Interrupt:4
+
+eth0.1    Link encap:Ethernet  HWaddr 2C:B0:5D:42:DB:9F
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:38198 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:111220 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0
+          RX bytes:5343665 (5.0 MiB)  TX bytes:144805122 (138.0 MiB)
+
+eth0.2    Link encap:Ethernet  HWaddr 2C:B0:5D:42:DB:9F
+          inet addr:10.7.7.94  Bcast:10.7.7.255  Mask:255.255.255.0
+          inet6 addr: fe80::2eb0:5dff:fe42:db9f/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:275801 errors:0 dropped:5 overruns:0 frame:0
+          TX packets:34831 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0
+          RX bytes:360781632 (344.0 MiB)  TX bytes:5379526 (5.1 MiB)
+
+lo        Link encap:Local Loopback
+          inet addr:127.0.0.1  Mask:255.0.0.0
+          inet6 addr: ::1/128 Scope:Host
+          UP LOOPBACK RUNNING  MTU:65536  Metric:1
+          RX packets:16 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:16 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0
+          RX bytes:1621 (1.5 KiB)  TX bytes:1621 (1.5 KiB)
 
 
