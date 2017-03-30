@@ -1,4 +1,13 @@
 .*.sw?
 *.o
 *.d
+*.a
+config.log
+config.status
 amtrelayd
+amtgwd
+testhmac
+testpatricia
+Makefile
+.deps/
+autom4te.cache/
