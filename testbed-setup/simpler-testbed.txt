@@ -27,12 +27,15 @@ sudo ip netns exec mrelay   ip addr add dev veth2 10.3.3.1/24 brd +
 sudo ip netns exec mrcv     ip addr add dev veth3 10.3.3.2/24 brd +
 sudo ip netns exec mrcv     ip route add default dev veth3
 
+# relay listens on loopback address:
+sudo ip netns exec mrelay ip link add dev lo1 type dummy
+sudo ip netns exec mrelay ip addr add 127.0.0.1 dev lo1
 
 # run as needed:
 sudo ip netns exec msnd unbuffer iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900 &
 
 
-sudo ip netns exec mrelay unbuffer amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" -g 12222 &
+sudo ip netns exec mrelay unbuffer amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" &
 
 
 sudo ip netns exec mrcv unbuffer amt/gateway/amtgwd -a 10.3.3.1 -s 10.4.4.0/24 -d -n &
@@ -46,5 +49,7 @@ sudo ip netns exec mrcv unbuffer iperf-ssm/src/iperf --server --udp --single_udp
 # sudo ip netns exec mrcv unbuffer tcpdump -i veth3 -n
 # sudo ip netns exec mrcv unbuffer tcpdump -i tun0 -n
 
+# debugging
+# sudo ip netns exec mrelay unbuffer gdb --args amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32"
 
 

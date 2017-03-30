@@ -277,159 +277,6 @@ relay_icmp_init(relay_instance* instance)
 }
 
 static void
-dns_reply(int fd, short flags, void* uap)
-{
-    (void)fd;
-    (void)flags;
-    char response[100], str_avg_qdelay[100];
-    int nbytes;
-    relay_instance* instance = (relay_instance*)uap;
-    double avg_qdelay;
-
-    if (instance->n_qsamples == 0)
-        avg_qdelay = 0.0;
-    else
-        avg_qdelay = 1.0 * instance->agg_qdelay / instance->n_qsamples;
-
-    if (relay_debug(instance)) {
-        fprintf(stderr, "Send DNS response, avg delay: %f\n", avg_qdelay);
-    }
-
-    sprintf(str_avg_qdelay, "%f", avg_qdelay);
-
-    /* Ignore the data sent by the DNS,  send reponse directly */
-    if (avg_qdelay >= instance->qdelay_thresh &&
-          instance->enable_queuing_delay_test) {
-        sprintf(response, "HTTP/1.1 500 Internal Server "
-                          "Error\r\nContent-Length:%u\r\n\r\n%f",
-              (unsigned int)strlen(str_avg_qdelay), avg_qdelay);
-    } else {
-        sprintf(response, "HTTP/1.1 200 OK\r\nContent-Length:%u\r\n\r\n%f",
-              (unsigned int)strlen(str_avg_qdelay), avg_qdelay);
-    }
-
-    /* Set dns_com_sk to blocking mode */
-    /* if(socket_set_blocking(instance->dns_com_sk)) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "DNS com socket blocking failed: %s\n",
-    strerror(errno));
-        }
-        close(instance->dns_com_sk);
-        return;
-    } */
-
-    nbytes = write(instance->dns_com_sk, response, strlen(response));
-    if (nbytes < 0) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "DNS com socket write failed: %s\n",
-                  strerror(errno));
-        }
-    }
-
-    close(instance->dns_com_sk);
-
-    /* reset */
-    instance->agg_qdelay = 0;
-    instance->n_qsamples = 0;
-}
-
-static void
-dns_connect(int fd, short flags, void* uap)
-{
-    (void)fd;
-    (void)flags;
-    struct sockaddr_in dns_addr;
-    socklen_t addrlen = sizeof(dns_addr);
-    relay_instance* instance = (relay_instance*)uap;
-
-    if (relay_debug(instance)) {
-        fprintf(stderr, "Receive DNS query\n");
-    }
-
-    instance->dns_com_sk = accept(
-          instance->dns_listen_sk, (struct sockaddr*)&dns_addr, &addrlen);
-    if (instance->dns_com_sk < 0) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "DNS listen socket accept failed: %s\n",
-                  strerror(errno));
-        }
-        return;
-    }
-
-    if (socket_set_non_blocking(instance->dns_com_sk)) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "DNS com socket nonblocking failed: %s\n",
-                  strerror(errno));
-        }
-        close(instance->dns_com_sk);
-        return;
-    }
-
-    instance->sk_read_ev = event_new(instance->event_base,
-            instance->dns_com_sk, EV_READ, dns_reply, instance);
-    if (event_add(instance->sk_read_ev, NULL)) {
-        if (relay_debug(instance)) {
-            fprintf(stderr, "DNS com socket event failed: %s\n",
-                  strerror(errno));
-        }
-        close(instance->dns_com_sk);
-        return;
-    }
-}
-
-static void
-relay_dns_init(relay_instance* instance)
-{
-    struct sockaddr_in serv_addr;
-    int reuse = 1;
-
-    bzero((char*)&serv_addr, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(instance->dns_listen_port);
-
-    instance->dns_listen_sk = socket(AF_INET, SOCK_STREAM, 0);
-    if (instance->dns_listen_sk < 0) {
-        fprintf(stderr, "DNS listen socket init failed: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-
-    if (setsockopt(instance->dns_listen_sk, SOL_SOCKET, SO_REUSEADDR,
-              &reuse, sizeof(reuse)) < 0) {
-        fprintf(stderr, "DNS listen socket address reuse failed %s\n",
-              strerror(errno));
-        exit(1);
-    }
-
-    if (bind(instance->dns_listen_sk, (struct sockaddr*)&serv_addr,
-              sizeof(serv_addr)) < 0) {
-        fprintf(stderr, "DNS listen socket bind failed: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-
-    if (listen(instance->dns_listen_sk, 16) < 0) {
-        fprintf(stderr, "DNS socket listen failed: %s\n", strerror(errno));
-        exit(1);
-    }
-
-    if (socket_set_non_blocking(instance->dns_listen_sk) < 0) {
-        fprintf(stderr, "DNS listen socket nonblocking failed: %s\n",
-              strerror(errno));
-        exit(1);
-    }
-
-    instance->sk_listen_ev = event_new(instance->event_base,
-            instance->dns_listen_sk, EV_READ | EV_PERSIST, dns_connect,
-            instance);
-    if (event_add(instance->sk_listen_ev, NULL)) {
-        fprintf(stderr, "DNS listen socket event failed\n");
-        exit(1);
-    }
-}
-
-static void
 relay_event_init(relay_instance* instance)
 {
     instance->event_base = event_base_new();
@@ -481,10 +328,8 @@ usage(char* name)
 {
     fprintf(stderr, "usage: %s -a anycast prefix/plen [-d] [-q count "
                     "of packets to dequeue at once] [-t queuing delay "
-                    "threshold (default 100 msec)] [-g DNS live test "
-                    "listening port (default 80)] [-b AMT port (default "
-                    "2268)] [--enable-queuing-delay-test enable the DNS "
-                    "live test for queuing delay]\n",
+                    "threshold (default 100 msec)] [-b AMT port (default "
+                    "2268)] [-c data_interface]\n",
           name);
     exit(1);
 }
@@ -599,7 +444,7 @@ relay_url_init(relay_instance* instance)
             sa = (struct sockaddr*)&sin;
             bzero(sa, salen);
             sin.sin_family = instance->relay_af;
-            sin.sin_addr.s_addr = htonl(INADDR_ANY);
+            sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             sin.sin_port = htons(instance->relay_url_port);
             break;
 
@@ -607,7 +452,7 @@ relay_url_init(relay_instance* instance)
             salen = sizeof(sin6);
             sa = (struct sockaddr*)&sin6;
             bzero(sa, salen);
-            sin6.sin6_addr = in6addr_any;
+            sin6.sin6_addr = in6addr_loopback;
             sin6.sin6_family = instance->relay_af;
             sin6.sin6_port = htons(instance->relay_url_port);
             break;
@@ -685,29 +530,35 @@ main(int argc, char** argv)
     char tunnel_addr[MAX_ADDR_STRLEN];
     struct sockaddr_in addr;
     struct sockaddr_in6 addr6;
-    struct option long_options[] = { { "enable-queuing-delay-test",
-                                           no_argument, 0, 'e' } };
-
-    /*
-     * assume IPv4 for the first release.
-     * We'll make it fully address family indepdent later
-     */
+    struct option long_options[] = {
+        { "anycast", required_argument, 0, 'a' },
+        { "amt-port", required_argument, 0, 'b' },
+        { "debug", no_argument, 0, 'd' },
+        { "icmp-suppress", no_argument, 0, 'i' },
+        { "queue-length", required_argument, 0, 'q' },
+        { "queue-thresh", required_argument, 0, 't' },
+        { "interface", required_argument, 0, 'c' },
+        { "port", required_argument, 0, 'p' },
+        { "file", required_argument, 0, 'f' },
+        { "net-relay", required_argument, 0, 'n' },
+        { "tun-relay", required_argument, 0, 'l' }
+    };
+    int icmp_suppress = 0;
     TAILQ_INIT(&instance_head);
     instance = relay_instance_alloc(AF_INET);
 
     BIT_RESET(instance->relay_flags, RELAY_FLAG_DEBUG);
     instance->dequeue_count = 1;
     instance->qdelay_thresh = 100;
-    instance->dns_listen_port = 80;
     instance->amt_port = AMT_PORT;
-    instance->enable_queuing_delay_test = 0;
 
     bzero((char*)&listen_addr, sizeof(listen_addr));
 
     plen = 0;
     tunnel_addr[0] = '\0';
 
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:",
+    // TBD: config file instead of command line args.
+    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:i",
                   long_options, NULL)) != EOF) {
         switch (ch) {
             case 's': {
@@ -720,7 +571,7 @@ main(int argc, char** argv)
                 else if (strcmp(optarg, "inet6") == 0)
                     instance->tunnel_af = AF_INET6;
                 else {
-                    fprintf(stderr, "bad tunnel (-l) net specification: %s\n", optarg);
+                    fprintf(stderr, "bad tunnel (-l) net specification: %s (should be inet or inet6, for tunneled data ip family)\n", optarg);
                     exit(1);
                 }
                 break;
@@ -743,7 +594,7 @@ main(int argc, char** argv)
                 else if (strcmp(optarg, "inet6") == 0)
                     instance->relay_af = AF_INET6;
                 else {
-                    fprintf(stderr, "bad relay (-n) net specification: %s\n", optarg);
+                    fprintf(stderr, "bad relay (-n) net specification: %s (should be inet or inet6, for address family for amt port)\n", optarg);
                     exit(1);
                 }
                 break;
@@ -813,9 +664,12 @@ main(int argc, char** argv)
             case 'd':
                 BIT_SET(instance->relay_flags, RELAY_FLAG_DEBUG);
                 break;
+            case 'i':
+                icmp_suppress = 1;
+                break;
             case 'q':
                 if (optarg == NULL) {
-                    fprintf(stderr, "must specify dequeue length\n");
+                    fprintf(stderr, "must specify dequeue length (-q 1 default)\n");
                     exit(1);
                 }
                 instance->dequeue_count = strtol(optarg, NULL, 10);
@@ -823,32 +677,21 @@ main(int argc, char** argv)
             case 't':
                 if (optarg == NULL) {
                     fprintf(
-                          stderr, "must specify the queueing threshold\n");
+                          stderr, "must specify the queueing threshold (-t 100 default, in ms)\n");
                     exit(1);
                 }
                 instance->qdelay_thresh = strtol(optarg, NULL, 10);
                 break;
-            case 'g':
-                if (optarg == NULL) {
-                    fprintf(stderr,
-                          "must specify the dns live test port number\n");
-                    exit(1);
-                }
-                instance->dns_listen_port = atoi(optarg);
-                break;
             case 'b':
                 if (optarg == NULL) {
-                    fprintf(stderr, "must specify the AMT port number\n");
+                    fprintf(stderr, "must specify the AMT port number (-b 2268 default)\n");
                     exit(1);
                 }
                 instance->amt_port = atoi(optarg);
                 break;
-            case 'e':
-                instance->enable_queuing_delay_test = 1;
-                break;
             case 'p':
                 if (optarg == NULL) {
-                    fprintf(stderr, "must specify port number\n");
+                    fprintf(stderr, "must specify reporting port number\n");
                     exit(1);
                 }
                 instance->relay_url_port = strtol(optarg, NULL, 10);
@@ -857,6 +700,11 @@ main(int argc, char** argv)
                           IPPORT_RESERVED);
                     exit(1);
                 }
+                break;
+            case 'u':
+            case 'g':
+            case 'e':
+                fprintf(stderr, "deprecated option '%c' ignored\n", ch);
                 break;
             default:
                 fprintf(stderr, "unknown argument '%c'\n", ch);
@@ -912,8 +760,9 @@ main(int argc, char** argv)
     relay_anycast_socket_init(
           instance, (struct sockaddr*)&listen_addr);
     relay_url_init(instance);
-    relay_dns_init(instance);
-    relay_icmp_init(instance);
+    if (!icmp_suppress) {
+        relay_icmp_init(instance);
+    }
 
     rc = event_base_dispatch(instance->event_base);
     if (rc) {

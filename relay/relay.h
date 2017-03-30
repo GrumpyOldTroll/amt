@@ -118,16 +118,12 @@ typedef struct _relay_instance
     char passphrase[NAMELEN]; /* local secret for HMAC-MD5 */
     u_int8_t packet_buffer[BUFFER_SIZE]; /* transmit/recv buffer */
     u_int32_t dequeue_count; /* number of packets to dequeue at once */
-    int dns_listen_sk;       /* For dns live test */
-    u_int16_t dns_listen_port;
-    int dns_com_sk;
     struct event *sk_listen_ev;
     struct event *sk_read_ev;
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
     u_int64_t n_qsamples;    /* queueing delay samples */
     u_int64_t qdelay_thresh; /* threhold of the queueing delay */
     u_int16_t amt_port;
-    u_int8_t enable_queuing_delay_test;
     int icmp_sk; /* For receiving ICMP messages */
     struct event *icmp_sk_ev;
     struct idle_sgs idle_sgs_list;
