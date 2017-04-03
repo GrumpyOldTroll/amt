@@ -126,7 +126,7 @@ void pat_add(pat_handle*, patext*);
 void pat_delete(pat_handle*, patext*);
 patext* pat_get(pat_handle*, u_int, u_char*);
 patext* pat_getnext(pat_handle*, u_char*, u_int);
-void pat_walk(pat_handle*, void (*func)(patext*));
+void pat_walk(pat_handle*, void* arg, void (*func)(void*, patext*));
 int pat_empty(pat_handle*);
 
 #endif  // AMT_LIBPATRICIA_PAT_H

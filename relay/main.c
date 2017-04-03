@@ -96,7 +96,7 @@ relay_instance_alloc(int af)
     /*
      * Initialize the roots of the radix trees
      */
-    instance->relay_root = NULL;
+    instance->relay_groot = NULL;
     instance->rif_root = NULL;
     instance->relay_url_port = DEFAULT_URL_PORT;
     instance->agg_qdelay = 0;
@@ -329,7 +329,11 @@ usage(char* name)
     fprintf(stderr, "usage: %s -a anycast prefix/plen [-d] [-q count "
                     "of packets to dequeue at once] [-t queuing delay "
                     "threshold (default 100 msec)] [-b AMT port (default "
-                    "2268)] [-c data_interface]\n",
+                    "2268)] [-c data_interface] [-i]\n"
+                    "  default is to run raw sockets (requires sudo). If "
+                    "one or more ports are passed with -w, only those "
+                    "ports will be handled. With -i (no icmp response), "
+                    "it's possible to run non-root.\n",
           name);
     exit(1);
 }
@@ -525,6 +529,7 @@ int
 main(int argc, char** argv)
 {
     int ch, rc, plen;
+    int icmp_suppress = 0;
     relay_instance* instance;
     struct sockaddr_storage listen_addr;
     char tunnel_addr[MAX_ADDR_STRLEN];
@@ -543,7 +548,6 @@ main(int argc, char** argv)
         { "net-relay", required_argument, 0, 'n' },
         { "tun-relay", required_argument, 0, 'l' }
     };
-    int icmp_suppress = 0;
     TAILQ_INIT(&instance_head);
     instance = relay_instance_alloc(AF_INET);
 
@@ -760,7 +764,7 @@ main(int argc, char** argv)
     relay_anycast_socket_init(
           instance, (struct sockaddr*)&listen_addr);
     relay_url_init(instance);
-    if (!icmp_suppress) {
+    if (icmp_suppress) {
         relay_icmp_init(instance);
     }
 

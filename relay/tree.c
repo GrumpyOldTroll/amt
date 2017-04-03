@@ -57,9 +57,32 @@ static const char __attribute__((unused)) id[] =
 #include "relay.h"
 #include "tree.h"
 
+static mem_handle mem_grnode_handle = NULL;
 static mem_handle mem_sgnode_handle = NULL;
 static mem_handle mem_gw_handle = NULL;
-static int sgcount = 0;
+
+static grnode*
+relay_grnode_get(relay_instance* instance)
+{
+    grnode* gr;
+
+    if (!mem_grnode_handle) {
+        mem_grnode_handle =
+              mem_type_init(sizeof(grnode), "Relay (S,G) node");
+    }
+    gr = (grnode*)mem_type_alloc(mem_grnode_handle);
+    gr->gr_instance = instance;
+
+    return gr;
+}
+
+static void
+relay_grnode_free(grnode* gr)
+{
+    if (gr) {
+        mem_type_free(mem_grnode_handle, gr);
+    }
+}
 
 static sgnode*
 relay_sgnode_get(relay_instance* instance)
@@ -80,12 +103,6 @@ static void
 relay_sgnode_free(sgnode* sg)
 {
     if (sg) {
-        if (sg->sg_source) {
-            prefix_free(sg->sg_source);
-        }
-        if (sg->sg_group) {
-            prefix_free(sg->sg_group);
-        }
         mem_type_free(mem_sgnode_handle, sg);
     }
 }
@@ -182,7 +199,8 @@ membership_leave(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
+        grnode* gr = sg->sg_grnode;
+        rc = setsockopt(gr->gr_socket, family2level(instance->tunnel_af)
               /* family2level(instance->relay_af) */,
               MCAST_LEAVE_GROUP, &greq, sizeof(greq));
 
@@ -225,7 +243,8 @@ membership_leave(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af)
+        grnode* gr = sg->sg_grnode;
+        rc = setsockopt(gr->gr_socket, family2level(instance->tunnel_af)
               /* family2level(instance->relay_af) */,
               MCAST_LEAVE_SOURCE_GROUP, &gsreq, sizeof(gsreq));
 
@@ -237,14 +256,11 @@ membership_leave(sgnode* sg)
         }
     }
 
-    close(sg->sg_socket);
-    sg->sg_socket = 0;
-
     return 0;
 }
 
 /*
- * Create a socket to receive data for this group on and join the group
+ * Join the group on the data-receiving socket
  */
 static void
 membership_join(sgnode* sg)
@@ -266,7 +282,6 @@ membership_join(sgnode* sg)
         }
     }
 
-    relay_socket_init(sg);
     if (sg->sg_source) {
         /* SSM */
         struct group_source_req gsreq;
@@ -300,12 +315,14 @@ membership_join(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af),
-              MCAST_JOIN_SOURCE_GROUP, &gsreq, sizeof(gsreq));
+        rc = setsockopt(sg->sg_grnode->gr_socket,
+                family2level(instance->tunnel_af),
+                MCAST_JOIN_SOURCE_GROUP, &gsreq, sizeof(gsreq));
 
         if (rc < 0) {
-            fprintf(stderr, "error MCAST_JOIN_SOURCE_GROUP sg socket: %s\n",
-                  strerror(errno));
+            fprintf(stderr,
+                    "error MCAST_JOIN_SOURCE_GROUP sg socket: %s\n",
+                    strerror(errno));
             exit(1);
         }
     } else {
@@ -331,12 +348,51 @@ membership_join(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_socket, family2level(instance->tunnel_af),
-              MCAST_JOIN_GROUP, &greq, sizeof(greq));
+        rc = setsockopt(sg->sg_grnode->gr_socket,
+                family2level(instance->tunnel_af),
+                MCAST_JOIN_GROUP, &greq, sizeof(greq));
         if (rc < 0) {
             fprintf(stderr, "error MCAST_JOIN_GROUP sg socket: %s\n",
                   strerror(errno));
             exit(1);
+        }
+    }
+}
+
+static void
+clean_after_gwdelete(sgnode* sg)
+{
+    if (pat_empty(&sg->sg_gwroot)) {
+        grnode* gr = sg->sg_grnode;
+        relay_instance* instance = gr->gr_instance;
+        if (sg == gr->gr_asmnode) {
+            assert(!sg->sg_source);
+            gr->gr_asmnode = NULL;
+        } else {
+            pat_delete(&gr->gr_sgroot, &sg->sg_node);
+        }
+        membership_leave(sg);
+        relay_sgnode_free(sg);
+        gr->gr_sgcount--;
+        instance->relay_sgcount--;
+        if (pat_empty(&gr->gr_sgroot) && !gr->gr_asmnode) {
+            if (gr->gr_receive_ev) {
+                int rc;
+                rc = event_del(gr->gr_receive_ev);
+                if (rc < 0) {
+                    fprintf(stderr, "error deleting gr event: %s\n",
+                            strerror(errno));
+                    exit(1);
+                }
+                event_free(gr->gr_receive_ev);
+                gr->gr_receive_ev = NULL;
+            }
+            close(gr->gr_socket);
+            gr->gr_socket = 0;
+            pat_delete(&instance->relay_groot,
+                    &gr->gr_node);
+            relay_grnode_free(gr);
+            instance->relay_grcount--;
         }
     }
 }
@@ -391,61 +447,50 @@ gw_delete(gw_t* gw)
     relay_gw_free(gw);
 }
 
-static prefix_t* find_pfx = NULL;
-
-static void
-for_each_sg_del(patext* ext)
-{
-    sgnode* sg = pat2sg(ext);
-    relay_instance* instance = sg->sg_instance;
-    gw_t* gw;
-
-    if ((gw = gw_find(sg, find_pfx)) != NULL)
-        gw_delete(gw);
-
-    if (pat_empty(&sg->sg_gwroot))
-        TAILQ_INSERT_TAIL(&(instance->idle_sgs_list), sg, idle_next);
-}
-
 void
 icmp_delete_gw(relay_instance* instance, prefix_t* pfx)
 {
     char str1[MAX_ADDR_STRLEN];
-    sgnode *sg, *tmp_sg;
-
-    find_pfx = pfx;
 
     if (relay_debug(instance)) {
-        fprintf(stderr, "Delete gw %s due to the ICMP message\n",
+        fprintf(stderr, "Delete gw %s from all sgs\n",
               prefix2str(pfx, str1, MAX_ADDR_STRLEN));
     }
 
     /* Delete the gw from sg tree */
-    if (!pat_empty(&(instance->relay_root))) {
+    if (!pat_empty(&(instance->relay_groot))) {
+        gw_t* gw;
+        patext* patgr = pat_getnext(&instance->relay_groot, NULL, 0);
+        while (patgr) {
+            grnode* gr = pat2gr(patgr);
+            patgr = pat_getnext(&instance->relay_groot, pat_key_get(patgr),
+                    pat_keysize_get(patgr));
 
-        pat_walk(&(instance->relay_root), for_each_sg_del);
-        for (sg = TAILQ_FIRST(&(instance->idle_sgs_list)); sg != NULL;
-              sg = tmp_sg) {
-            tmp_sg = TAILQ_NEXT(sg, idle_next);
-            TAILQ_REMOVE(&(instance->idle_sgs_list), sg, idle_next);
-
-            membership_leave(sg);
-            pat_delete(&instance->relay_root, &sg->sg_node);
-            int rc;
-            rc = event_del(sg->sg_receive_ev);
-            if (rc < 0) {
-                fprintf(stderr, "error deleting sg event: %s\n",
-                        strerror(errno));
-                exit(1);
+            if (gr->gr_asmnode) {
+                sgnode* sg = gr->gr_asmnode;
+                gw = gw_find(sg, pfx);
+                if (gw) {
+                    gw_delete(gw);
+                }
+                if (pat_empty(&sg->sg_gwroot)) {
+                    clean_after_gwdelete(sg);
+                }
             }
-            event_free(sg->sg_receive_ev);
-            relay_sgnode_free(sg);
-            /*
-             * remove the data link receive socket when the last
-             * sgnode is destroyed
-             */
-            if (--sgcount == 0) {
-                // XXX: do I need something when out of sgs?
+
+            patext *patsg = pat_getnext(&gr->gr_sgroot, NULL, 0);
+            while (patsg) {
+                sgnode* sg = pat2sg(patsg);
+                patsg = pat_getnext(&gr->gr_sgroot, pat_key_get(patsg),
+                        pat_keysize_get(patsg));
+
+                gw = gw_find(sg, pfx);
+                if (gw) {
+                    gw_delete(gw);
+                }
+
+                if (pat_empty(&sg->sg_gwroot)) {
+                    clean_after_gwdelete(sg);
+                }
             }
         }
     }
@@ -476,24 +521,7 @@ idle_delete(int fd, short event, void* arg)
         gw_delete(gw);
 
         if (pat_empty(&sg->sg_gwroot)) {
-            membership_leave(sg);
-            pat_delete(&instance->relay_root, &sg->sg_node);
-            int rc;
-            rc = event_del(sg->sg_receive_ev);
-            if (rc < 0) {
-                fprintf(stderr, "error deleting sg event: %s\n",
-                        strerror(errno));
-                exit(1);
-            }
-            event_free(sg->sg_receive_ev);
-            relay_sgnode_free(sg);
-            /*
-             * remove the data link receive socket when the last
-             * sgnode is destroyed
-             */
-            if (--sgcount == 0) {
-                // XXX: do i need something when out of sgs?
-            }
+            clean_after_gwdelete(sg);
         }
     }
 }
@@ -588,10 +616,15 @@ static void
 stream_print(struct evbuffer* buf, sgnode* sg)
 {
     char str[MAX_ADDR_STRLEN];
+    char str2[MAX_ADDR_STRLEN];
     patext* pat;
 
-    evbuffer_add_printf(buf, "%s\t%u\t%u\n",
-          prefix2str(sg->sg_group, str, sizeof(str)), sg->sg_packets,
+    evbuffer_add_printf(buf, "%s<-%s\t%u\t%u\n",
+          prefix2str(sg->sg_group, str, sizeof(str)),
+          sg->sg_source ?
+                prefix2str(sg->sg_source, str2, sizeof(str2)) :
+                "any",
+          sg->sg_packets,
           sg->sg_bytes);
 
     evbuffer_add_printf(buf, "\tGateway\tPackets\tBytes\n");
@@ -605,16 +638,32 @@ stream_print(struct evbuffer* buf, sgnode* sg)
     }
 }
 
+static void
+group_print(struct evbuffer* buf, grnode* gr)
+{
+    patext* pat;
+
+    if (gr->gr_asmnode) {
+        stream_print(buf, gr->gr_asmnode);
+    }
+    pat = pat_getnext(&gr->gr_sgroot, NULL, 0);
+    while (pat) {
+        stream_print(buf, pat2sg(pat));
+        pat = pat_getnext(&gr->gr_sgroot, pat_key_get(pat),
+              pat_keysize_get(pat));
+    }
+}
+
 void
 relay_show_streams(relay_instance* instance, struct evbuffer* buf)
 {
     patext* pat;
 
     evbuffer_add_printf(buf, "Group\tPackets\tBytes\n");
-    pat = pat_getnext(&instance->relay_root, NULL, 0);
+    pat = pat_getnext(&instance->relay_groot, NULL, 0);
     while (pat) {
-        stream_print(buf, pat2sg(pat));
-        pat = pat_getnext(&instance->relay_root, pat_key_get(pat),
+        group_print(buf, pat2gr(pat));
+        pat = pat_getnext(&instance->relay_groot, pat_key_get(pat),
               pat_keysize_get(pat));
     }
 }
@@ -628,56 +677,93 @@ membership_tree_refresh(relay_instance* instance,
 {
     patext* pat;
     sgnode* sg = NULL;
+    grnode* gr = NULL;
     gw_t* gw;
-    prefix_t* pfx;
+
+    pat = pat_get(&instance->relay_groot, prefix_keylen(group),
+            prefix_key(group));
+    if (pat) {
+        gr = pat2gr(pat);
+        if (source) {
+            pat = pat_get(&gr->gr_sgroot, prefix_keylen(source),
+                    prefix_key(source));
+            if (pat) {
+                sg = pat2sg(pat);
+            }
+        } else {
+            sg = gr->gr_asmnode;
+        }
+    }
     char str1[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN],
           str3[MAX_ADDR_STRLEN], str4[MAX_ADDR_STRLEN];
-
-    /*
-     * combine group/source into a single prefix
-     */
-    if (source) {
-        pfx = prefix_build_mcast(group, source);
-    } else {
-        pfx = prefix_dup(group);
-    }
-
-    pat = pat_get(
-          &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
-    if (pat) {
-        sg = pat2sg(pat);
-        /* sg node already has source and group prefix so free them */
-        prefix_free(source);
-        prefix_free(group);
-    }
+    int new_group = 0;
+    int new_source = 0;
 
     switch (mt) {
         case MEMBERSHIP_REPORT:
-            if (!sg) {
-
-                /*
-                 * create the data link receive socket when the first
-                 * sgnode is created.
-                 */
-                if (sgcount++ == 0) {
-                    // XXX: do I need something on first sg?
+            if (!gr) {
+                instance->relay_grcount++;
+                gr = relay_grnode_get(instance);
+                gr->gr_instance = instance;
+                gr->gr_group = &gr->gr_addr;
+                bcopy(group, &gr->gr_addr, sizeof(prefix_t));
+                if (relay_debug(instance)) {
+                    fprintf(stderr, "New %s group for %s/%u\n",
+                      (instance->tunnel_af == AF_INET) ? "INET" : "INET6",
+                      prefix2str(group, str1, sizeof(str1)),
+                      prefix_keylen(group));
                 }
-
+                pat_key_set(&gr->gr_node, prefix_key(&gr->gr_addr));
+                pat_keysize_set(&gr->gr_node, prefix_keylen(&gr->gr_addr));
+                pat_add(&instance->relay_groot, &gr->gr_node);
+                gr->gr_sgroot = NULL;
+                gr->gr_asmnode = NULL;
+                gr->gr_sgcount = 0;
+                gr->gr_socket = 0;
+                gr->gr_receive_ev = NULL;
+                new_group = 1;
+            }
+            if (!sg) {
+                instance->relay_sgcount++;
+                gr->gr_sgcount++;
                 sg = relay_sgnode_get(instance);
                 sg->sg_instance = instance;
-                sg->sg_group = group;
-                sg->sg_source = source;
-                bcopy(pfx, &sg->sg_addr, sizeof(prefix_t));
-                if (relay_debug(instance)) {
-                    fprintf(stderr, "Set %s prefix filter for %s/%u\n",
-                      (instance->tunnel_af == AF_INET) ? "INET" : "INET6",
-                      prefix2str(pfx, str1, sizeof(str1)),
-                      prefix_keylen(pfx));
-                }
-                pat_key_set(&sg->sg_node, prefix_key(&sg->sg_addr));
-                pat_keysize_set(&sg->sg_node, prefix_keylen(&sg->sg_addr));
-                pat_add(&instance->relay_root, &sg->sg_node);
+                sg->sg_grnode = gr;
+                sg->sg_group = gr->gr_group;
                 sg->sg_gwroot = NULL;
+                sg->sg_packets = 0;
+                sg->sg_bytes = 0;
+                if (!source) {
+                    assert(!gr->gr_asmnode);
+                    gr->gr_asmnode = sg;
+                    sg->sg_source = NULL;
+                    bzero(&sg->sg_addr, sizeof(prefix_t));
+                    if (relay_debug(instance)) {
+                        fprintf(stderr, "New %s ASM within %s/%u\n",
+                          (instance->tunnel_af == AF_INET) ?
+                                "INET" : "INET6",
+                          prefix2str(group, str2, sizeof(str2)),
+                          prefix_keylen(group));
+                    }
+                } else {
+                    bcopy(source, &sg->sg_addr, sizeof(prefix_t));
+                    pat_key_set(&sg->sg_node, prefix_key(&sg->sg_addr));
+                    pat_keysize_set(&sg->sg_node,
+                            prefix_keylen(&sg->sg_addr));
+                    pat_add(&gr->gr_sgroot, &sg->sg_node);
+                    sg->sg_source = &sg->sg_addr;
+                    if (relay_debug(instance)) {
+                        fprintf(stderr, "New %s source for %s/%u within "
+                                "%s/%u\n",
+                          (instance->tunnel_af == AF_INET) ?
+                                "INET" : "INET6",
+                          prefix2str(source, str1, sizeof(str1)),
+                          prefix_keylen(source),
+                          prefix2str(group, str2, sizeof(str2)),
+                          prefix_keylen(group));
+                    }
+                }
+                new_source = 1;
             }
             if (relay_debug(instance)) {
                 fprintf(stderr, "Received %s membership report for %s/%s "
@@ -685,8 +771,9 @@ membership_tree_refresh(relay_instance* instance,
                       (instance->tunnel_af == AF_INET) ? "INET" : "INET6",
                       prefix2str(sg->sg_group, str1, sizeof(str1)),
                       (sg->sg_source == NULL)
-                            ? "None"
-                            : prefix2str(sg->sg_source, str2, sizeof(str2)),
+                            ? "(ASM)"
+                            : prefix2str(sg->sg_source, str2,
+                                sizeof(str2)),
                       prefix2str(pkt->pkt_src, str3, sizeof(str3)),
                       ntohs(pkt->pkt_sport),
                       prefix2str(pkt->pkt_dst, str4, sizeof(str4)),
@@ -704,57 +791,37 @@ membership_tree_refresh(relay_instance* instance,
             gw_update(gw, pkt->pkt_fd, pkt->pkt_sport, pkt->pkt_dst,
                   pkt->pkt_dport);
 
-            if (!sg->sg_socket) {
+            if (new_group) {
+                data_socket_init(gr);
+            }
+            if (new_source) {
                 membership_join(sg);
             }
             break;
 
         case MEMBERSHIP_LEAVE:
             if (sg) {
-                if (relay_debug(instance)) {
-                    fprintf(stderr, "Recevied %s leave message for %s/%s "
-                                    "from %s:%u to %s:%u\n",
-                          (instance->tunnel_af == AF_INET)
-                                /* (pkt->pkt_af == AF_INET)*/
-                                ? "INET"
-                                : "INET6",
-                          prefix2str(sg->sg_group, str1, sizeof(str1)),
-                          (sg->sg_source == NULL)
-                                ? "None"
-                                : prefix2str(
-                                        sg->sg_source, str2, sizeof(str2)),
-                          prefix2str(pkt->pkt_src, str3, sizeof(str3)),
-                          ntohs(pkt->pkt_sport),
-                          prefix2str(pkt->pkt_dst, str4, sizeof(str4)),
-                          ntohs(pkt->pkt_dport));
-                }
+                assert(gr);
                 gw = gw_find(sg, pkt->pkt_src);
                 if (gw) {
+                    if (relay_debug(instance)) {
+                        fprintf(stderr, "Recevied %s leave message for "
+                                "%s/%s from %s:%u to %s:%u\n",
+                              /* (pkt->pkt_af == AF_INET)*/
+                              (instance->tunnel_af == AF_INET)
+                                    ? "INET" : "INET6",
+                              prefix2str(sg->sg_group, str1, sizeof(str1)),
+                              (sg->sg_source == NULL)
+                                    ? "None" : prefix2str(sg->sg_source,
+                                        str2, sizeof(str2)),
+                              prefix2str(pkt->pkt_src, str3, sizeof(str3)),
+                              ntohs(pkt->pkt_sport),
+                              prefix2str(pkt->pkt_dst, str4, sizeof(str4)),
+                              ntohs(pkt->pkt_dport));
+                    }
                     gw_delete(gw);
 
-                    if (pat_empty(&sg->sg_gwroot)) {
-                        membership_leave(sg);
-                        pat_delete(&instance->relay_root, &sg->sg_node);
-                        int rc;
-                        rc = event_del(sg->sg_receive_ev);
-                        if (rc < 0) {
-                            fprintf(stderr, "error deleting sg event: %s\n",
-                                    strerror(errno));
-                            exit(1);
-                        }
-                        event_free(sg->sg_receive_ev);
-                        relay_sgnode_free(sg);
-                        /*
-                         * remove the data link receive socket when the last
-                         * sgnode is destroyed
-                         */
-                        if (--sgcount == 0) {
-                            // XXX: do i need something when out of sgs?
-                        }
-                    } else {
-                        prefix_free(source);
-                        prefix_free(group);
-                    }
+                    clean_after_gwdelete(sg);
                 } else {
                     if (relay_debug(instance)) {
                         fprintf(stderr, "Leave for group %s/%s not joined "
@@ -767,8 +834,6 @@ membership_tree_refresh(relay_instance* instance,
                               prefix2str(pkt->pkt_src, str3, sizeof(str3)),
                               ntohs(pkt->pkt_sport));
                     }
-                    prefix_free(source);
-                    prefix_free(group);
                 }
             } else {
                 if (relay_debug(instance)) {
@@ -778,15 +843,12 @@ membership_tree_refresh(relay_instance* instance,
                                 ? "None"
                                 : prefix2str(source, str2, sizeof(str2)));
                 }
-                prefix_free(source);
-                prefix_free(group);
             }
             break;
 
         default:
             assert(mt == MEMBERSHIP_REPORT || mt == MEMBERSHIP_LEAVE);
     }
-    prefix_free(pfx);
 }
 
 static void
@@ -908,10 +970,9 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
 }
 
 static void
-forward_mcast_data(packet* pkt, patext* pat)
+forward_mcast_data(packet* pkt, sgnode* sg)
 {
-    sgnode* sg;
-    sg = pat2sg(pat);
+    patext* pat;
     pat = pat_getnext(&sg->sg_gwroot, NULL, 0);
     if (pat) {
         sg->sg_packets++;
@@ -944,46 +1005,25 @@ relay_forward(packet* pkt)
 {
     patext* pat;
     relay_instance* instance;
-    prefix_t* pfx;
 
     instance = pkt->pkt_instance;
-    /* Cater SSM requests if any */
-    pfx = prefix_build_mcast(pkt->pkt_dst, pkt->pkt_src);
-    pat = pat_get(
-          &instance->relay_root, prefix_keylen(pfx), prefix_key(pfx));
 
+    /* Cater SSM requests if any */
+    pat = pat_get(&instance->relay_groot, prefix_keylen(pkt->pkt_dst),
+            prefix_key(pkt->pkt_dst));
     if (pat) {
-        /*
-        if (relay_debug(instance)) {
-            sgnode* sg = pat2sg(pat);
-            char str[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
-            fprintf(stderr, "forwarding s,g %s -> %s (%p)\n",
-                    prefix2str(pkt->pkt_src, str, sizeof(str)),
-                    prefix2str(pkt->pkt_dst, str2, sizeof(str2)), sg);
-        }
-        */
-        forward_mcast_data(pkt, pat);
-    } else {
-        /* Otherwise cater ASM requests */
-        pat = pat_get(&instance->relay_root, prefix_keylen(pkt->pkt_dst),
-              prefix_key(pkt->pkt_dst));
-        /*
-        if (relay_debug(instance)) {
-            sgnode* sg = 0;
-            if (pat) {
-                sg = pat2sg(pat);
-            }
-            char str[MAX_ADDR_STRLEN], str2[MAX_ADDR_STRLEN];
-            fprintf(stderr, "forwarding g %s -> %s (%p)\n",
-                    prefix2str(pkt->pkt_src, str, sizeof(str)),
-                    prefix2str(pkt->pkt_dst, str2, sizeof(str2)), sg);
-        }
-        */
+        grnode* gr;
+        gr = pat2gr(pat);
+        pat = pat_get(&gr->gr_sgroot, prefix_keylen(pkt->pkt_src),
+                prefix_key(pkt->pkt_src));
         if (pat) {
-            forward_mcast_data(pkt, pat);
+            sgnode* sg;
+            sg = pat2sg(pat);
+            forward_mcast_data(pkt, sg);
+        }
+        if (gr->gr_asmnode) {
+            forward_mcast_data(pkt, gr->gr_asmnode);
         }
     }
-    prefix_free(pfx);
-
 }
 

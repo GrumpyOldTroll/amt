@@ -423,26 +423,26 @@ pat_delete(pat_handle* handle, patext* ext)
 }
 
 /* void
-pat_walk(pat_handle handle, void (*func)(patext *))
+pat_walk(pat_handle handle, void* arg, void (*func)(void*, patext *))
 {
     if (handle == NULL)
         return;
 
     if (handle->pat_ext)
-        (*func)(handle->pat_ext);
+        (*func)(arg, handle->pat_ext);
 
-    pat_walk(handle->pat_left, func);
-    pat_walk(handle->pat_right, func);
+    pat_walk(handle->pat_left, arg, func);
+    pat_walk(handle->pat_right, arg, func);
 }*/
 
 void
-pat_walk(pat_handle* handle, void (*func)(patext*))
+pat_walk(pat_handle* handle, void* arg, void (*func)(void*, patext*))
 {
     patnode* rn = *handle;
 
     for (;;) {
         if (rn != NULL && (rn->pat_ext)) {
-            (*func)(rn->pat_ext);
+            (*func)(arg, rn->pat_ext);
         }
 
         if (rn->pat_left) {

@@ -1349,7 +1349,7 @@ relay_packet_deq(int fd, short event, void* uap)
                     source = NULL;
                     TAILQ_INIT(&grec_head);
                     /*
-                     * lookup the relay gnonce for the 3-way handshake
+                     * lookup the relay nonce for the 3-way handshake
                      * if there isn't one, toss it
                      */
                     if (relay_response_mac_verify(pkt)) {
@@ -1365,6 +1365,16 @@ relay_packet_deq(int fd, short event, void* uap)
                         }
                         break;
                     }
+                    /* TBD: This seems not quite right. A membership report
+                     * saying exclude all under group x, for instance, I
+                     * think should find all joined, not result in only a
+                     * leave for the asm group. Doesn't look to be
+                     * there? Somewhere has to figure out the diff between
+                     * relay's current picture for this gateway and gateway
+                     * latest report, and it seems neither here nor in
+                     * membership_tree_refresh.
+                     * -Jake 2017-04-02
+                     */
                     while (!TAILQ_EMPTY(&grec_head)) {
                         tmprec = TAILQ_FIRST(&grec_head);
                         group = tmprec->group;
@@ -2047,21 +2057,22 @@ print_pat(patext* pat)
 */
 
 void
-relay_socket_init(sgnode* sg)
+data_socket_init(grnode* gr)
 {
     // XXX: actually maybe I do. I think this needs to be on a shared
-    // refcounted group object, not on a specific sg. Make sure to fix that,
-    // else I think joining s1,g1 and s2,g1 will dup packets?
-    relay_instance* instance = sg->sg_instance;
+    // refcounted group object, not on a specific sg. Make sure to fix
+    // that, else I think joining s1,g1 and s2,g1 will dup packets?
+    relay_instance* instance = gr->gr_instance;
     int family = instance->tunnel_af;
     char str[MAX_ADDR_STRLEN];
     struct sockaddr_storage gaddr_buf;
     struct sockaddr* gaddr = (struct sockaddr*)&gaddr_buf;
     // ((struct sockaddr_in*)gaddr)->sin_port = htons(5001);
-    int gaddr_len = prefix2sock(sg->sg_group, gaddr);
+    int gaddr_len = prefix2sock(gr->gr_group, gaddr);
     int trueval = 1;
     int sock;
     int rc;
+
     sock = socket(family, SOCK_RAW, IPPROTO_UDP);
     fprintf(stderr, "created data socket: %d, binding %s\n", sock,
             inet_ntop(family, gaddr, str, sizeof(str)));
@@ -2118,17 +2129,18 @@ relay_socket_init(sgnode* sg)
     }
     rc = fcntl(sock, F_SETFL, rc | O_NONBLOCK);
     if (rc < 0) {
-        fprintf(
-              stderr, "error O_NONBLOCK on socket: %s\n", strerror(errno));
+        fprintf(stderr, "error O_NONBLOCK on socket: %s\n",
+                strerror(errno));
         exit(1);
     }
-    sg->sg_socket = sock;
+    gr->gr_socket = sock;
 
-    sg->sg_receive_ev = event_new(instance->event_base, sg->sg_socket,
-          EV_READ | EV_PERSIST, relay_socket_read, (void*)instance);
-    rc = event_add(sg->sg_receive_ev, NULL);
+    gr->gr_receive_ev = event_new(instance->event_base, gr->gr_socket,
+          EV_READ | EV_PERSIST, data_socket_read, (void*)gr);
+    rc = event_add(gr->gr_receive_ev, NULL);
     if (rc < 0) {
-        fprintf(stderr, "error relay socket event_add: %s\n", strerror(errno));
+        fprintf(stderr, "error data socket event_add: %s\n",
+                strerror(errno));
         exit(1);
     }
 
@@ -2162,12 +2174,13 @@ relay_socket_init(sgnode* sg)
 }
 
 void
-relay_socket_read(int fd, short flags, void* uap)
+data_socket_read(int fd, short flags, void* uap)
 {
     (void)fd;
     (void)flags;
     int rc;
-    relay_instance* instance = (relay_instance*)uap;
+    grnode* gr = (grnode*)uap;
+    relay_instance* instance = gr->gr_instance;
 
     do {
         packet* pkt = relay_pkt_get(instance);

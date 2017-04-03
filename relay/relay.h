@@ -88,6 +88,7 @@ typedef struct _relay_stats
 } relay_stats;
 
 #define RELAY_FLAG_DEBUG 0x1
+#define RELAY_FLAG_NONRAW 0x2
 
 #define DEFAULT_URL_PORT 8080
 
@@ -107,7 +108,7 @@ typedef struct _relay_instance
     int tunnel_af;          /* address family for tunneled protocols*/
     int relay_anycast_sock; /* anycast socket */
     struct event *relay_anycast_ev;       /* libevent handle */
-    pat_handle relay_root;               /* group/source patricia tree */
+    pat_handle relay_groot;               /* group/source patricia tree */
     pat_handle rif_root;                 /* src address patricia tree */
     struct packets pkt_head[NUM_QUEUES]; /* priority queued packets */
     struct event *relay_pkt_timer;        /* pointer to timer handle */
@@ -129,6 +130,8 @@ typedef struct _relay_instance
     struct idle_sgs idle_sgs_list;
     unsigned int cap_iface_index;        /* Interface index to capture the
                                             multicast packets */
+    unsigned int relay_grcount;
+    unsigned int relay_sgcount;          /* includes ASM gorups */
     char cap_iface_name[16]; // IFNAMSIZ might be better here.
     struct sockaddr_storage tunnel_addr; /* IP address used in the tunnel */
     struct event_base *event_base;
@@ -174,24 +177,50 @@ pat2rif(patext* ext)
     return ((recv_if*)((intptr_t)ext - offsetof(recv_if, rif_node)));
 }
 
+struct _sgnode;
 /*
- * Each patricia tree node points to a (S,G) that someone is interested
+ * Each patricia tree node points to a (*,G) that someone is interested
  * in receiving. The socket is to receive the true multicast packets
  * and the list of receivers hangs here for forwarding.
  */
+typedef struct _grnode
+{
+    patext gr_node;                 /* patricia node, key must follow */
+    prefix_t gr_addr;               /* key: source/group key */
+    prefix_t* gr_group;             /* multicast group */
+    relay_instance* gr_instance;    /* parent instance */
+    pat_handle gr_sgroot;           /* sg address patricia tree */
+    int gr_socket;                  /* recv multicast on this socket */
+    struct event *gr_receive_ev;    /* libevent handle */
+    struct _sgnode* gr_asmnode;
+    unsigned int gr_sgcount;        /* includes ASM node. */
+} grnode;
+
+/*
+ * Map from external key to grnode
+ */
+static inline grnode*
+pat2gr(patext* ext)
+{
+    return ((grnode*)((intptr_t)ext - offsetof(grnode, gr_node)));
+}
+
+/*
+ * Each patricia tree node points to a (S,G) that someone is interested
+ * in receiving. The data from a socket in the gnode will forward to all
+ * (S,G)
+ */
 typedef struct _sgnode
 {
-    TAILQ_ENTRY(_sgnode) idle_next; /* idle list */
     patext sg_node;                 /* patricia node, key must follow */
-    prefix_t sg_addr;               /* key: source/group key */
-    prefix_t* sg_group;             /* multicast group */
+    prefix_t sg_addr;               /* key: source key */
     prefix_t* sg_source;            /* data source address or NULL */
+    prefix_t* sg_group;             /* shared ref to parent group addr */
+    grnode* sg_grnode;              /* parent group */
     relay_instance* sg_instance;    /* parent instance */
-    int sg_socket;                  /* recv multicast on this socket */
     pat_handle sg_gwroot;           /* gw address patricia tree */
     u_int32_t sg_packets;           /* # packets forwarded */
     u_int32_t sg_bytes;             /* # bytes forwarded */
-    struct event *sg_receive_ev;       /* libevent handle */
 } sgnode;
 
 /*
@@ -291,8 +320,8 @@ void relay_accept_url(int, short, void*);
 void relay_sg_except_read(int, short, void*);
 int relay_socket_shared_init(int family, struct sockaddr*);
 void relay_rif_free(recv_if*);
-void relay_socket_init(sgnode* sg);
-void relay_socket_read(int fd, short flags, void* uap);
+void data_socket_init(grnode* gr);
+void data_socket_read(int fd, short flags, void* uap);
 void relay_show_streams(relay_instance*, struct evbuffer*);
 void icmp_delete_gw(relay_instance* instance, prefix_t* pfx);
 

@@ -73,6 +73,13 @@ my_print(patext* ext)
     fprintf(stderr, "\n");
 }
 
+void
+my_print2(void* arg, patext* ext)
+{
+    (void)arg;
+    my_print(ext);
+}
+
 int main(argc, argv) int argc;
 char* argv[];
 {
@@ -107,7 +114,7 @@ char* argv[];
     pat_add(&root, &n3->extkey);
 
     fprintf(stderr, "\nWalking tree with pat_walk\n");
-    pat_walk(&root, my_print);
+    pat_walk(&root, NULL, my_print2);
 
     new = pat2my(pat_get(&root, sizeof(idxs) * NBBY, idxs));
 
