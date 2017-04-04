@@ -67,8 +67,13 @@ relay_grnode_get(relay_instance* instance)
     grnode* gr;
 
     if (!mem_grnode_handle) {
-        mem_grnode_handle =
-              mem_type_init(sizeof(grnode), "Relay (S,G) node");
+        unsigned int extra_recvs = 0;
+        if (instance->nonraw_count > 1) {
+            extra_recvs = instance->nonraw_count - 1;
+        }
+        mem_grnode_handle = mem_type_init(
+                sizeof(grnode) + sizeof(grrecv)*extra_recvs,
+                "Relay (S,G) node");
     }
     gr = (grnode*)mem_type_alloc(mem_grnode_handle);
     gr->gr_instance = instance;
@@ -200,9 +205,10 @@ membership_leave(sgnode* sg)
         }
 
         grnode* gr = sg->sg_grnode;
-        rc = setsockopt(gr->gr_socket, family2level(instance->tunnel_af)
-              /* family2level(instance->relay_af) */,
-              MCAST_LEAVE_GROUP, &greq, sizeof(greq));
+        rc = setsockopt(gr->gr_recv[0].gv_socket,
+                family2level(instance->tunnel_af)
+                /* family2level(instance->relay_af) */,
+                MCAST_LEAVE_GROUP, &greq, sizeof(greq));
 
         if (rc < 0) {
             fprintf(stderr, "error MCAST_LEAVE_GROUP sg socket: %s\n",
@@ -244,9 +250,10 @@ membership_leave(sgnode* sg)
         }
 
         grnode* gr = sg->sg_grnode;
-        rc = setsockopt(gr->gr_socket, family2level(instance->tunnel_af)
-              /* family2level(instance->relay_af) */,
-              MCAST_LEAVE_SOURCE_GROUP, &gsreq, sizeof(gsreq));
+        rc = setsockopt(gr->gr_recv[0].gv_socket,
+                family2level(instance->tunnel_af)
+                /* family2level(instance->relay_af) */,
+                MCAST_LEAVE_SOURCE_GROUP, &gsreq, sizeof(gsreq));
 
         if (rc < 0) {
             fprintf(stderr,
@@ -315,7 +322,7 @@ membership_join(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_grnode->gr_socket,
+        rc = setsockopt(sg->sg_grnode->gr_recv[0].gv_socket,
                 family2level(instance->tunnel_af),
                 MCAST_JOIN_SOURCE_GROUP, &gsreq, sizeof(gsreq));
 
@@ -348,7 +355,7 @@ membership_join(sgnode* sg)
             }
         }
 
-        rc = setsockopt(sg->sg_grnode->gr_socket,
+        rc = setsockopt(sg->sg_grnode->gr_recv[0].gv_socket,
                 family2level(instance->tunnel_af),
                 MCAST_JOIN_GROUP, &greq, sizeof(greq));
         if (rc < 0) {
@@ -376,19 +383,27 @@ clean_after_gwdelete(sgnode* sg)
         gr->gr_sgcount--;
         instance->relay_sgcount--;
         if (pat_empty(&gr->gr_sgroot) && !gr->gr_asmnode) {
-            if (gr->gr_receive_ev) {
-                int rc;
-                rc = event_del(gr->gr_receive_ev);
-                if (rc < 0) {
-                    fprintf(stderr, "error deleting gr event: %s\n",
-                            strerror(errno));
-                    exit(1);
-                }
-                event_free(gr->gr_receive_ev);
-                gr->gr_receive_ev = NULL;
+            unsigned int nsocks = gr->gr_instance->nonraw_count;
+            if (nsocks == 0) {
+                nsocks = 1;
             }
-            close(gr->gr_socket);
-            gr->gr_socket = 0;
+            unsigned int i;
+            for (i = 0; i < nsocks; i++) {
+                grrecv* gv = &gr->gr_recv[i];
+                if (gv->gv_receive_ev) {
+                    int rc;
+                    rc = event_del(gv->gv_receive_ev);
+                    if (rc < 0) {
+                        fprintf(stderr, "error deleting gr event: %s\n",
+                                strerror(errno));
+                        exit(1);
+                    }
+                    event_free(gv->gv_receive_ev);
+                    gv->gv_receive_ev = NULL;
+                }
+                close(gv->gv_socket);
+                gv->gv_socket = 0;
+            }
             pat_delete(&instance->relay_groot,
                     &gr->gr_node);
             relay_grnode_free(gr);
@@ -719,8 +734,6 @@ membership_tree_refresh(relay_instance* instance,
                 gr->gr_sgroot = NULL;
                 gr->gr_asmnode = NULL;
                 gr->gr_sgcount = 0;
-                gr->gr_socket = 0;
-                gr->gr_receive_ev = NULL;
                 new_group = 1;
             }
             if (!sg) {

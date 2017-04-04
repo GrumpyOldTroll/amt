@@ -148,6 +148,11 @@ relay_instance_free(relay_instance* instance)
         event_base_free(instance->event_base);
         instance->event_base = NULL;
     }
+    if (instance->nonraw_ports) {
+        free(instance->nonraw_ports);
+        instance->nonraw_ports = NULL;
+        instance->nonraw_count = 0;
+    }
 
     mem_type_free(mem_rinstance_handle, instance);
 }
@@ -329,11 +334,11 @@ usage(char* name)
     fprintf(stderr, "usage: %s -a anycast prefix/plen [-d] [-q count "
                     "of packets to dequeue at once] [-t queuing delay "
                     "threshold (default 100 msec)] [-b AMT port (default "
-                    "2268)] [-c data_interface] [-i]\n"
+                    "2268)] [-c data_interface] [-i] [-e] [-w port]*\n"
                     "  default is to run raw sockets (requires sudo). If "
                     "one or more ports are passed with -w, only those "
                     "ports will be handled. With -i (no icmp response), "
-                    "it's possible to run non-root.\n",
+                    "it's possible to run non-root. -e will\n",
           name);
     exit(1);
 }
@@ -546,7 +551,9 @@ main(int argc, char** argv)
         { "port", required_argument, 0, 'p' },
         { "file", required_argument, 0, 'f' },
         { "net-relay", required_argument, 0, 'n' },
-        { "tun-relay", required_argument, 0, 'l' }
+        { "tun-relay", required_argument, 0, 'l' },
+        { "non-raw", required_argument, 0, 'w' },
+        { "external", required_argument, 0, 'e' }
     };
     TAILQ_INIT(&instance_head);
     instance = relay_instance_alloc(AF_INET);
@@ -562,7 +569,7 @@ main(int argc, char** argv)
     tunnel_addr[0] = '\0';
 
     // TBD: config file instead of command line args.
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:i",
+    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:eiw:",
                   long_options, NULL)) != EOF) {
         switch (ch) {
             case 's': {
@@ -668,9 +675,40 @@ main(int argc, char** argv)
             case 'd':
                 BIT_SET(instance->relay_flags, RELAY_FLAG_DEBUG);
                 break;
+            case 'e':
+                BIT_SET(instance->relay_flags, RELAY_FLAG_EXTERNAL);
+                break;
             case 'i':
                 icmp_suppress = 1;
                 break;
+            case 'w': {
+                if (optarg == NULL) {
+                    fprintf(stderr, "must specify a port with -w/--non-raw");
+                    exit(1);
+                }
+                long port_val = strtol(optarg, NULL, 10);
+                if (port_val > 0xffff || port_val < 0) {
+                    fprintf(stderr, "non-raw UDP ports are betwen 0 and %u "
+                            "(bad value %ld\n", 0xffff, port_val);
+                    exit(1);
+                }
+                u_int16_t* new_ptr = realloc(instance->nonraw_ports,
+                        sizeof(u_int16_t)*(instance->nonraw_count +1));
+                if (!new_ptr) {
+                    if (instance->nonraw_ports) {
+                        free(instance->nonraw_ports);
+                    }
+                    fprintf(stderr, "oom while allocating nonraw port %u\n",
+                            (unsigned int)instance->nonraw_count);
+                    exit(1);
+                }
+                BIT_SET(instance->relay_flags, RELAY_FLAG_NONRAW);
+                instance->nonraw_ports = new_ptr;
+                instance->nonraw_ports[instance->nonraw_count] =
+                    (u_int16_t)port_val;
+                instance->nonraw_count += 1;
+                break;
+            }
             case 'q':
                 if (optarg == NULL) {
                     fprintf(stderr, "must specify dequeue length (-q 1 default)\n");
@@ -707,7 +745,6 @@ main(int argc, char** argv)
                 break;
             case 'u':
             case 'g':
-            case 'e':
                 fprintf(stderr, "deprecated option '%c' ignored\n", ch);
                 break;
             default:

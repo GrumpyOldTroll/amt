@@ -89,6 +89,7 @@ typedef struct _relay_stats
 
 #define RELAY_FLAG_DEBUG 0x1
 #define RELAY_FLAG_NONRAW 0x2
+#define RELAY_FLAG_EXTERNAL 0x4
 
 #define DEFAULT_URL_PORT 8080
 
@@ -124,7 +125,10 @@ typedef struct _relay_instance
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
     u_int64_t n_qsamples;    /* queueing delay samples */
     u_int64_t qdelay_thresh; /* threhold of the queueing delay */
+    u_int16_t next_ip_id;
     u_int16_t amt_port;
+    u_int16_t nonraw_count;
+    u_int16_t *nonraw_ports;
     int icmp_sk; /* For receiving ICMP messages */
     struct event *icmp_sk_ev;
     struct idle_sgs idle_sgs_list;
@@ -177,7 +181,17 @@ pat2rif(patext* ext)
     return ((recv_if*)((intptr_t)ext - offsetof(recv_if, rif_node)));
 }
 
+struct _grnode;
 struct _sgnode;
+
+typedef struct _grrecv
+{
+    struct _grnode* gv_gr;          /* parent group node */
+    int gv_socket;                  /* recv multicast on this socket */
+    struct event *gv_receive_ev;    /* libevent handle */
+    u_int16_t gv_port;              /* listening port (0 for raw) */
+} grrecv;
+
 /*
  * Each patricia tree node points to a (*,G) that someone is interested
  * in receiving. The socket is to receive the true multicast packets
@@ -190,10 +204,9 @@ typedef struct _grnode
     prefix_t* gr_group;             /* multicast group */
     relay_instance* gr_instance;    /* parent instance */
     pat_handle gr_sgroot;           /* sg address patricia tree */
-    int gr_socket;                  /* recv multicast on this socket */
-    struct event *gr_receive_ev;    /* libevent handle */
     struct _sgnode* gr_asmnode;
     unsigned int gr_sgcount;        /* includes ASM node. */
+    grrecv gr_recv[1];              /* length either 1 or nonraw_count */
 } grnode;
 
 /*
@@ -281,8 +294,7 @@ typedef struct _packet
     uint8_t pkt_optbuf[40];         /* amt/udp/ip when forwarding data */
     prefix_t *pkt_src, *pkt_dst;   /* source and destination addr */
     u_int64_t enq_time; /* timestamp when this packet is enqueued */
-    u_int pkt_prequel_len;
-    uint8_t *pkt_prequel;
+    unsigned int pkt_offset;
     uint8_t *pkt_data;
     uint8_t pkt_space[];
 } packet;
