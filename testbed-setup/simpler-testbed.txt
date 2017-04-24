@@ -32,7 +32,9 @@ sudo ip netns exec mrelay ip link add dev lo1 type dummy
 sudo ip netns exec mrelay ip addr add 127.0.0.1 dev lo1
 
 # run as needed:
-sudo ip netns exec msnd unbuffer iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900 &
+# sudo ip netns exec msnd unbuffer iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 30 &
+
+sudo ip netns exec msnd unbuffer bash -x -c 'while true; do iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900; sleep 1; done' &
 
 
 sudo ip netns exec mrelay unbuffer amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" &
@@ -77,4 +79,6 @@ sudo ip netns exec mrcv     ip addr add dev veth3 10.3.3.2/24 brd +
 sudo ip netns exec mrcv     ip route add default dev veth3
 
 sudo gdb --args amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32"
+
+valgrind relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" -w 5001
 

@@ -29,6 +29,9 @@ cd openwrt
 #Build instructions here:
 #https://wiki.openwrt.org/doc/howto/build
 make menuconfig
+# Find your specific hardware here:
+# https://wiki.openwrt.org/toh/start
+#
 # The router I brought is described here, yours may vary:
 #   https://wiki.openwrt.org/toh/hwdata/netgear/netgear_wndr3700_v3
 # Target system: Broadcom BCM47xx/53xx (MIPS)
@@ -40,7 +43,8 @@ make menuconfig
 
 # non-defaults that I turned on:
 # Package the OpenWRT-based Toolchain
-# Libraries/libevent2
+# Libraries/
+#    libevent2
 # LuCI/Collections/luci
 # Network/Routing/
 #    ip-full
@@ -50,11 +54,16 @@ make menuconfig
 #    iftop
 #    tcpdump
 make tools/install && make toolchain/install
-export PATH="$(pwd)/staging_dir/host:$(pwd)/staging_dir/toolchain-mipsel_74kc+dsp2_gcc-4.8-linaro_uClibc-0.9.33.2/bin:$PATH"
-# again, your toolchain path may vary...
 
-vi ~/.bashrc
-# add: export PATH="$(pwd)/staging_dir/host:$(pwd)/staging_dir/toolchain-mipsel_74kc+dsp2_gcc-4.8-linaro_uClibc-0.9.33.2/bin:$PATH"
+# set your path in .bashrc:
+D="${HOME}/openwrt/staging_dir"; echo "export PATH=\"${D}/host/bin:$(ls -d ${D}/toolchain*)/bin:\${PATH}\"" | tee -a ~/.bashrc
+
+# then log out and back in, or otherwise get that path.
+
+# your path may vary. looks like:
+# amt@openwrt-ar71xx:~$ tail -1 ~/.bashrc
+# export PATH="/home/amt/openwrt/staging_dir/host/bin:/home/amt/openwrt/staging_dir/toolchain-mips_34kc_gcc-4.8-linaro_uClibc-0.9.33.2/bin:${PATH}"
+
 make world
 
 # grab current sources of relevant projects
