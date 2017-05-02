@@ -1005,25 +1005,41 @@ static uint16_t
 iov_csum(struct iovec* iov, unsigned int iov_len)
 {
     unsigned int iov_idx;
-    unsigned int data_idx = 0;
     unsigned long sum = 0;
+    unsigned int odd_byte = 0;
+    union {
+        uint16_t us;
+        uint8_t uc[2];
+    } edges;
     for (iov_idx = 0; iov_idx < iov_len; ++iov_idx) {
-        unsigned int cur_len = iov[iov_idx].iov_len;
+        unsigned int n_left = iov[iov_idx].iov_len;
         const uint8_t *cur_data = (const uint8_t*)iov[iov_idx].iov_base;
-        unsigned int cur_idx;
-        for (cur_idx = 0; cur_idx < cur_len;
-                ++cur_idx, ++data_idx, ++cur_data) {
-            if (data_idx % 2 == 1) {
-                sum += ((unsigned long)(*cur_data)) << 8;
-            } else {
-                sum += (unsigned long)(*cur_data);
-            }
+        if (odd_byte) {
+            edges.uc[0] = 0;
+            edges.uc[1] = *cur_data;
+            sum += edges.us;
+            n_left -= 1;
+            cur_data += 1;
+        }
+        while (n_left > 1) {
+            sum += *((const uint16_t*)cur_data);
+            cur_data += 2;
+            n_left -= 2;
+        }
+        if (n_left > 0) {
+            edges.uc[0] = *cur_data;
+            edges.uc[1] = 0;
+            sum += edges.us;
+            odd_byte = 1;
+        } else {
+            odd_byte = 0;
         }
     }
     while (sum>>16) {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    return ~sum;
+    uint16_t final = (uint16_t)(~sum);
+    return final;
 }
 
 static unsigned short
@@ -1065,12 +1081,16 @@ add_membership_query(relay_instance* instance, packet* pkt, u_int8_t* cp)
             iph->ip_dst.s_addr = inet_addr("224.0.0.1");
 
             /* IGMPv3 membership query */
+            // https://tools.ietf.org/html/rfc3376#section-4.1
             igmpq = (struct igmpv3*)(cp + sizeof(struct ip));
             igmpq->igmp_type = IGMP_HOST_MEMBERSHIP_QUERY;
-            igmpq->igmp_code = 100;
+            // igmpq->igmp_code = 100;
+            igmpq->igmp_code = 16;  // 1.6s response time, instead of 10s (match cisco)
             igmpq->igmp_cksum = 0;
             igmpq->igmp_group.s_addr = 0;
-            igmpq->igmp_misc = (1 << 3); // suppress=1
+            // igmpq->igmp_misc = (1 << 3); // suppress=1
+            // igmpq->igmp_misc = 0; // (cisco doesn't do suppress=1)
+            igmpq->igmp_misc = 2; // no suppress, plus set qrv to 2
             igmpq->igmp_qqi = QQIC;
             igmpq->igmp_numsrc = 0;
             // igmpq->srcs[0] = 0; // removed: any chance this was a buffer overflow?
@@ -2370,9 +2390,9 @@ data_socket_read(int fd, short flags, void* uap)
 
                 uph->uh_sum = 0;
                 /*
-                // 2 problems with this bit:
-                // a. it should just be 0, the udp checksum is optional.
-                // b. the iov_csum is coming up wrong here for 125-payload pkts
+                // this works, but can just be 0, the udp checksum is
+                // optional.
+                // [TBD]: make udp checksum configurably optional?
                 uint8_t pshdr_v[4];
                 pshdr_v[0] = 0;
                 pshdr_v[1] = iph->ip_p;
