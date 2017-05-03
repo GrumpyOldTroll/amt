@@ -140,7 +140,7 @@ amtrelayd_LDFLAGS =
 DEFAULT_INCLUDES =  -I. -I$(srcdir)
 depcomp = $(SHELL) $(top_srcdir)/depcomp
 am__depfiles_maybe = depfiles
-@AMDEP_TRUE@DEP_FILES = ./$(DEPDIR)/main.Po ./$(DEPDIR)/config.Po \./$(DEPDIR)/recv.Po \
+@AMDEP_TRUE@DEP_FILES = ./$(DEPDIR)/main.Po ./$(DEPDIR)/config.Po ./$(DEPDIR)/recv.Po \
 @AMDEP_TRUE@	./$(DEPDIR)/tree.Po
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
