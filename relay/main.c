@@ -37,7 +37,6 @@ static const char __attribute__((unused)) id[] =
 #include <assert.h>
 #include <event.h>
 #include <fcntl.h>
-#include <getopt.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
@@ -104,6 +103,11 @@ relay_instance_alloc(int af)
 
     /* Capture interface index */
     instance->cap_iface_index = 0;
+
+    // BIT_RESET(instance->relay_flags, RELAY_FLAG_DEBUG);
+    instance->dequeue_count = 10;
+    // instance->qdelay_thresh = 100;
+    instance->amt_port = AMT_PORT;
 
     return instance;
 }
@@ -328,21 +332,6 @@ relay_signal_init(relay_instance* instance)
     sigaction(SIGINT, &sa, 0);
 }
 
-static void
-usage(char* name)
-{
-    fprintf(stderr, "usage: %s -a anycast prefix/plen [-d] [-q count "
-                    "of packets to dequeue at once] [-t queuing delay "
-                    "threshold (default 100 msec)] [-b AMT port (default "
-                    "2268)] [-c data_interface] [-i] [-e] [-w port]*\n"
-                    "  default is to run raw sockets (requires sudo). If "
-                    "one or more ports are passed with -w, only those "
-                    "ports will be handled. With -i (no icmp response), "
-                    "it's possible to run non-root. -e will\n",
-          name);
-    exit(1);
-}
-
 int
 relay_socket_shared_init(int family,
       struct sockaddr* bind_addr)
@@ -365,17 +354,24 @@ relay_socket_shared_init(int family,
 
     if (bind_addr) {
         int bind_addr_len = 0;
+        void* addrp = bind_addr;
+        uint16_t port = 0;
         if (family == AF_INET) {
             bind_addr_len = sizeof(struct sockaddr_in);
+            struct sockaddr_in* psa = (struct sockaddr_in*)bind_addr;
+            addrp = &psa->sin_addr;
+            port = psa->sin_port;
         } else if (family == AF_INET6) {
             bind_addr_len = sizeof(struct sockaddr_in6);
+            struct sockaddr_in6* psa = (struct sockaddr_in6*)bind_addr;
+            addrp = &psa->sin6_addr;
+            port = psa->sin6_port;
         }
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
-            fprintf(stderr, "error binding socket (%s :%u/%u): %s\n",
-                    inet_ntop(family, &bind_addr, str, sizeof(str)),
-                    htons(((struct sockaddr_in*)bind_addr)->sin_port),
-                    bind_addr_len, strerror(errno));
+            fprintf(stderr, "error binding socket (%s:%u): %s\n",
+                    inet_ntop(family, addrp, str, sizeof(str)),
+                    htons(port), strerror(errno));
             exit(1);
         }
         /*
@@ -446,6 +442,10 @@ relay_url_init(relay_instance* instance)
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
     struct sockaddr* sa = NULL;
+    char str[MAX_ADDR_STRLEN];
+    void* addrp = 0;
+    int family = instance->relay_af;
+    uint16_t port = instance->relay_url_port;
 
     switch (instance->relay_af) {
         case AF_INET:
@@ -455,6 +455,7 @@ relay_url_init(relay_instance* instance)
             sin.sin_family = instance->relay_af;
             sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
             sin.sin_port = htons(instance->relay_url_port);
+            addrp = &sin.sin_addr;
             break;
 
         case AF_INET6:
@@ -464,6 +465,7 @@ relay_url_init(relay_instance* instance)
             sin6.sin6_addr = in6addr_loopback;
             sin6.sin6_family = instance->relay_af;
             sin6.sin6_port = htons(instance->relay_url_port);
+            addrp = &sin6.sin6_addr;
             break;
 
         default:
@@ -474,30 +476,35 @@ relay_url_init(relay_instance* instance)
 
     // val = TRUE;
     // len = sizeof(val);
-
     sock = socket(instance->relay_af, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
-        fprintf(stderr, "error creating URL socket: %s\n", strerror(errno));
+        fprintf(stderr, "error creating URL socket (%s:%u): %s\n",
+                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                strerror(errno));
         exit(1);
     }
 
     rc = bind(sock, sa, salen);
     if (rc < 0) {
-        fprintf(stderr, "error binding url socket: %s\n", strerror(errno));
+        fprintf(stderr, "error binding url socket (%s:%u): %s\n",
+                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                strerror(errno));
         exit(1);
     }
 
     rc = fcntl(sock, F_SETFL, O_NONBLOCK);
     if (rc < 0) {
-        fprintf(
-              stderr, "error O_NONBLOCK on socket: %s\n", strerror(errno));
+        fprintf(stderr, "error O_NONBLOCK on url socket (%s:%u): %s\n",
+                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                strerror(errno));
         exit(1);
     }
 
     rc = listen(sock, 5);
     if (rc < 0) {
-        fprintf(
-              stderr, "error url listen on socket: %s\n", strerror(errno));
+        fprintf(stderr, "error url listen on socket (%s:%u): %s\n",
+                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                strerror(errno));
         exit(1);
     }
 
@@ -505,7 +512,9 @@ relay_url_init(relay_instance* instance)
             EV_READ | EV_PERSIST, relay_accept_url, (void*)instance);
     rc = event_add(instance->relay_url_ev, NULL);
     if (rc < 0) {
-        fprintf(stderr, "error url event_add: %s\n", strerror(errno));
+        fprintf(stderr, "error url event_add on socket (%s:%u): %s\n",
+                inet_ntop(family, addrp, str, sizeof(str)), htons(port),
+                strerror(errno));
         exit(1);
     }
     instance->relay_url_sock = sock;
@@ -533,275 +542,24 @@ relay_anycast_socket_init(relay_instance* instance,
 int
 main(int argc, char** argv)
 {
-    int ch, rc, plen;
-    int icmp_suppress = 0;
     relay_instance* instance;
-    struct sockaddr_storage listen_addr;
-    char tunnel_addr[MAX_ADDR_STRLEN];
-    struct sockaddr_in addr;
-    struct sockaddr_in6 addr6;
-    struct option long_options[] = {
-        { "anycast", required_argument, 0, 'a' },
-        { "amt-port", required_argument, 0, 'b' },
-        { "debug", no_argument, 0, 'd' },
-        { "icmp-suppress", no_argument, 0, 'i' },
-        { "queue-length", required_argument, 0, 'q' },
-        { "queue-thresh", required_argument, 0, 't' },
-        { "interface", required_argument, 0, 'c' },
-        { "port", required_argument, 0, 'p' },
-        { "file", required_argument, 0, 'f' },
-        { "net-relay", required_argument, 0, 'n' },
-        { "tun-relay", required_argument, 0, 'l' },
-        { "non-raw", required_argument, 0, 'w' },
-        { "external", required_argument, 0, 'e' }
-    };
     TAILQ_INIT(&instance_head);
     instance = relay_instance_alloc(AF_INET);
 
-    BIT_RESET(instance->relay_flags, RELAY_FLAG_DEBUG);
-    instance->dequeue_count = 1;
-    instance->qdelay_thresh = 100;
-    instance->amt_port = AMT_PORT;
-
-    bzero((char*)&listen_addr, sizeof(listen_addr));
-
-    plen = 0;
-    tunnel_addr[0] = '\0';
-
-    // TBD: config file instead of command line args.
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:eiw:",
-                  long_options, NULL)) != EOF) {
-        switch (ch) {
-            case 's': {
-                strcpy(tunnel_addr, optarg);
-                break;
-            }
-            case 'l': {
-                if (strcmp(optarg, "inet") == 0)
-                    instance->tunnel_af = AF_INET;
-                else if (strcmp(optarg, "inet6") == 0)
-                    instance->tunnel_af = AF_INET6;
-                else {
-                    fprintf(stderr, "bad tunnel (-l) net specification: %s (should be inet or inet6, for tunneled data ip family)\n", optarg);
-                    exit(1);
-                }
-                break;
-            }
-            case 'c': {
-                instance->cap_iface_index = if_nametoindex(optarg);
-                if (instance->cap_iface_index == 0) {
-                    perror("bad capture interface name");
-                    exit(1);
-                }
-                strncpy(instance->cap_iface_name, optarg,
-                        sizeof(instance->cap_iface_name));
-                instance->cap_iface_name[
-                    sizeof(instance->cap_iface_name)-1] = 0;
-                break;
-            }
-            case 'n':
-                if (strcmp(optarg, "inet") == 0)
-                    instance->relay_af = AF_INET;
-                else if (strcmp(optarg, "inet6") == 0)
-                    instance->relay_af = AF_INET6;
-                else {
-                    fprintf(stderr, "bad relay (-n) net specification: %s (should be inet or inet6, for address family for amt port)\n", optarg);
-                    exit(1);
-                }
-                break;
-            case 'a': {
-                char* pstr = NULL;
-                pstr = strsep(&optarg, "/");
-                if (pstr == NULL) {
-                    fprintf(stderr,
-                          "bad anycast prefix: expecting prefix/len\n");
-                    exit(1);
-                }
-                if (optarg == NULL) {
-                    fprintf(stderr, "bad anycast prefix length\n");
-                    exit(1);
-                }
-
-                switch (instance->relay_af) {
-                    case AF_INET: {
-                        struct sockaddr_in *addrp =
-                            (struct sockaddr_in*)&listen_addr;
-                        rc = inet_pton(AF_INET, pstr, &addrp->sin_addr);
-                        if (rc == 1) {
-                            plen = strtol(optarg, NULL, 10);
-                            if (plen == 0) {
-                                fprintf(stderr,
-                                      "bad anycast prefix length\n");
-                                exit(1);
-                            }
-                            if (plen > AMT_HOST_PLEN) {
-                                fprintf(stderr,
-                                      "anycast prefix length too long\n");
-                                exit(1);
-                            }
-                            addrp->sin_family = AF_INET;
-                        } else {
-                            fprintf(stderr, "bad anycast prefix\n");
-                            exit(1);
-                        }
-                        break;
-                    }
-                    case AF_INET6: {
-                        struct sockaddr_in6 *addrp =
-                            (struct sockaddr_in6*)&listen_addr;
-                        rc = inet_pton(AF_INET6, pstr, &addrp->sin6_addr);
-                        if (rc == 1) {
-                            plen = strtol(optarg, NULL, 10);
-                            if (plen == 0) {
-                                fprintf(stderr,
-                                      "bad anycast prefix length\n");
-                                exit(1);
-                            }
-                            if (plen > AMT_HOST6_PLEN) {
-                                fprintf(stderr,
-                                      "anycast prefix length too long\n");
-                                exit(1);
-                            }
-                            addrp->sin6_family = AF_INET6;
-                        } else {
-                            fprintf(stderr, "bad anycast prefix\n");
-                            exit(1);
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
-            case 'd':
-                BIT_SET(instance->relay_flags, RELAY_FLAG_DEBUG);
-                break;
-            case 'e':
-                BIT_SET(instance->relay_flags, RELAY_FLAG_EXTERNAL);
-                break;
-            case 'i':
-                icmp_suppress = 1;
-                break;
-            case 'w': {
-                if (optarg == NULL) {
-                    fprintf(stderr, "must specify a port with -w/--non-raw");
-                    exit(1);
-                }
-                long port_val = strtol(optarg, NULL, 10);
-                if (port_val > 0xffff || port_val < 0) {
-                    fprintf(stderr, "non-raw UDP ports are betwen 0 and %u "
-                            "(bad value %ld\n", 0xffff, port_val);
-                    exit(1);
-                }
-                u_int16_t* new_ptr = realloc(instance->nonraw_ports,
-                        sizeof(u_int16_t)*(instance->nonraw_count +1));
-                if (!new_ptr) {
-                    if (instance->nonraw_ports) {
-                        free(instance->nonraw_ports);
-                    }
-                    fprintf(stderr, "oom while allocating nonraw port %u\n",
-                            (unsigned int)instance->nonraw_count);
-                    exit(1);
-                }
-                BIT_SET(instance->relay_flags, RELAY_FLAG_NONRAW);
-                instance->nonraw_ports = new_ptr;
-                instance->nonraw_ports[instance->nonraw_count] =
-                    (u_int16_t)port_val;
-                instance->nonraw_count += 1;
-                break;
-            }
-            case 'q':
-                if (optarg == NULL) {
-                    fprintf(stderr, "must specify dequeue length (-q 1 default)\n");
-                    exit(1);
-                }
-                instance->dequeue_count = strtol(optarg, NULL, 10);
-                break;
-            case 't':
-                if (optarg == NULL) {
-                    fprintf(
-                          stderr, "must specify the queueing threshold (-t 100 default, in ms)\n");
-                    exit(1);
-                }
-                instance->qdelay_thresh = strtol(optarg, NULL, 10);
-                break;
-            case 'b':
-                if (optarg == NULL) {
-                    fprintf(stderr, "must specify the AMT port number (-b 2268 default)\n");
-                    exit(1);
-                }
-                instance->amt_port = atoi(optarg);
-                break;
-            case 'p':
-                if (optarg == NULL) {
-                    fprintf(stderr, "must specify reporting port number\n");
-                    exit(1);
-                }
-                instance->relay_url_port = strtol(optarg, NULL, 10);
-                if (instance->relay_url_port < IPPORT_RESERVED) {
-                    fprintf(stderr, "must use port number => %d\n",
-                          IPPORT_RESERVED);
-                    exit(1);
-                }
-                break;
-            case 'u':
-            case 'g':
-                fprintf(stderr, "deprecated option '%c' ignored\n", ch);
-                break;
-            default:
-                fprintf(stderr, "unknown argument '%c'\n", ch);
-            case '?':
-                usage(argv[0]);
-        }
-    }
-
-    if (instance->relay_af == AF_INET) {
-        struct sockaddr_in* paddr = (struct sockaddr_in*)&listen_addr;
-        paddr->sin_port = htons(instance->amt_port);
-    } else {
-        struct sockaddr_in6* paddr = (struct sockaddr_in6*)&listen_addr;
-        paddr->sin6_port = htons(instance->amt_port);
-    }
-
-    if (plen == 0) {
-        fprintf(stderr, "anycast prefix/len must be set with -a\n");
+    int rc;
+    rc = relay_parse_command_line(instance, argc, argv);
+    if (rc) {
+        fprintf(stderr, "failure parsing command line args\n");
         exit(1);
-    }
-
-    if (instance->cap_iface_index == 0) {
-        fprintf(stderr, "missing capture interface name\n");
-        exit(1);
-    }
-
-    // Get tunnel address
-    if (strlen(tunnel_addr) == 0) {
-        fprintf(stderr, "missing tunnel addr\n");
-        exit(1);
-    }
-    if (instance->tunnel_af == AF_INET) {
-        if (inet_pton(instance->tunnel_af, tunnel_addr, &(addr.sin_addr)) !=
-              1) {
-            fprintf(stderr, "invalid tunnel addr\n");
-            exit(1);
-        }
-        addr.sin_family = AF_INET;
-        bcopy(&addr, &instance->tunnel_addr, sizeof(addr));
-    } else {
-        if (inet_pton(instance->tunnel_af, tunnel_addr, &addr6.sin6_addr) !=
-              1) {
-            fprintf(stderr, "invalid tunnel addr\n");
-            exit(1);
-        }
-        addr6.sin6_family = AF_INET6;
-        bcopy(&addr6, &instance->tunnel_addr, sizeof(addr6));
     }
 
     relay_event_init(instance);
     relay_signal_init(instance);
 
     relay_anycast_socket_init(
-          instance, (struct sockaddr*)&listen_addr);
+          instance, (struct sockaddr*)&instance->listen_addr);
     relay_url_init(instance);
-    if (icmp_suppress) {
+    if (!BIT_TEST(instance->relay_flags, RELAY_FLAG_NOICMP)) {
         relay_icmp_init(instance);
     }
 

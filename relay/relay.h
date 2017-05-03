@@ -38,6 +38,11 @@
 #define AMT_RELAY_RELAY_H
 
 #include <stdint.h>
+#include <sys/queue.h>
+#include <event.h>
+#include "amt.h"
+#include "prefix.h"
+#include "pat.h"
 
 #define AMT_PACKET_Q_USEC 50
 #define NAMELEN 128
@@ -90,6 +95,7 @@ typedef struct _relay_stats
 #define RELAY_FLAG_DEBUG 0x1
 #define RELAY_FLAG_NONRAW 0x2
 #define RELAY_FLAG_EXTERNAL 0x4
+#define RELAY_FLAG_NOICMP 0x8
 
 #define DEFAULT_URL_PORT 8080
 
@@ -119,12 +125,11 @@ typedef struct _relay_instance
     u_int16_t relay_url_port; /* port to listen for URL requests */
     char passphrase[NAMELEN]; /* local secret for HMAC-MD5 */
     u_int8_t packet_buffer[BUFFER_SIZE]; /* transmit/recv buffer */
-    u_int32_t dequeue_count; /* number of packets to dequeue at once */
+    int dequeue_count; /* number of packets to dequeue at once */
     struct event *sk_listen_ev;
     struct event *sk_read_ev;
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
     u_int64_t n_qsamples;    /* queueing delay samples */
-    u_int64_t qdelay_thresh; /* threhold of the queueing delay */
     u_int16_t next_ip_id;
     u_int16_t amt_port;
     u_int16_t nonraw_count;
@@ -137,7 +142,8 @@ typedef struct _relay_instance
     unsigned int relay_grcount;
     unsigned int relay_sgcount;          /* includes ASM gorups */
     char cap_iface_name[16]; // IFNAMSIZ might be better here.
-    struct sockaddr_storage tunnel_addr; /* IP address used in the tunnel */
+    struct sockaddr_storage tunnel_addr; /* IP address used as the source addr for membership queries */
+    struct sockaddr_storage listen_addr; /* IP address to listen for packets from gateways */
     struct event_base *event_base;
 } relay_instance;
 
@@ -336,5 +342,7 @@ void data_socket_init(grnode* gr);
 void data_socket_read(int fd, short flags, void* uap);
 void relay_show_streams(relay_instance*, struct evbuffer*);
 void icmp_delete_gw(relay_instance* instance, prefix_t* pfx);
+int relay_parse_command_line(relay_instance* instance,
+        int argc, char** argv);
 
 #endif // AMT_RELAY_RELAY_H

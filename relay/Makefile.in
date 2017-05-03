@@ -110,7 +110,7 @@ target_alias = @target_alias@
 @WANT_MD5_TRUE@MD5_INCLUDES = -I$(top_builddir)/libmd5
 @WANT_MD5_TRUE@MD5_LIBS = $(top_builddir)/libmd5/libmd5.a
 bin_PROGRAMS = amtrelayd
-amtrelayd_SOURCES = main.c recv.c tree.c tree.h relay.h
+amtrelayd_SOURCES = main.c config.c recv.c tree.c tree.h relay.h
 amtrelayd_LDADD = $(top_builddir)/libhmac/libhmac.a $(top_builddir)/libpatricia/libpatricia.a $(top_builddir)/libprefix/libprefix.a $(top_builddir)/libsum/libsum.a $(top_builddir)/libmem/libmem.a $(MD5_LIBS)
 AM_CPPFLAGS = -D_BSD_SOURCE -Werror -Wall -I$(top_builddir)/include -I$(top_builddir)/libmem -I$(top_builddir)/libhmac -I$(top_builddir)/libpatricia -I$(top_builddir)/libprefix -I$(top_builddir)/libsum $(MD5_INCLUDES)
 subdir = relay
@@ -120,7 +120,7 @@ CONFIG_CLEAN_FILES =
 bin_PROGRAMS = amtrelayd$(EXEEXT)
 PROGRAMS = $(bin_PROGRAMS)
 
-am_amtrelayd_OBJECTS = main.$(OBJEXT) recv.$(OBJEXT) tree.$(OBJEXT)
+am_amtrelayd_OBJECTS = main.$(OBJEXT) config.$(OBJEXT) recv.$(OBJEXT) tree.$(OBJEXT)
 amtrelayd_OBJECTS = $(am_amtrelayd_OBJECTS)
 @WANT_MD5_TRUE@amtrelayd_DEPENDENCIES = \
 @WANT_MD5_TRUE@	$(top_builddir)/libhmac/libhmac.a \
@@ -140,7 +140,7 @@ amtrelayd_LDFLAGS =
 DEFAULT_INCLUDES =  -I. -I$(srcdir)
 depcomp = $(SHELL) $(top_srcdir)/depcomp
 am__depfiles_maybe = depfiles
-@AMDEP_TRUE@DEP_FILES = ./$(DEPDIR)/main.Po ./$(DEPDIR)/recv.Po \
+@AMDEP_TRUE@DEP_FILES = ./$(DEPDIR)/main.Po ./$(DEPDIR)/config.Po \./$(DEPDIR)/recv.Po \
 @AMDEP_TRUE@	./$(DEPDIR)/tree.Po
 COMPILE = $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) \
 	$(CPPFLAGS) $(AM_CFLAGS) $(CFLAGS)
@@ -194,6 +194,7 @@ distclean-compile:
 	-rm -f *.tab.c
 
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/main.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/config.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/recv.Po@am__quote@
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/tree.Po@am__quote@
 

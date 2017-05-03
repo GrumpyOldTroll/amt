@@ -26,7 +26,7 @@ cd openwrt
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 
-#Build instructions here:
+#Build instructions below came from here:
 #https://wiki.openwrt.org/doc/howto/build
 make menuconfig
 # Find your specific hardware here:
@@ -72,11 +72,13 @@ git clone https://github.com/GrumpyOldTroll/amt.git
 git clone https://github.com/GrumpyOldTroll/amt-openwrt.git
 git clone https://github.com/GrumpyOldTroll/iperf-ssm.git
 
-ln -s ~/amt-openwrt ~/openwrt/package/network/utils/amt
-cd openwrt
+cp -r amt-openwrt ~/openwrt/feeds/routing/amt
+cd ~/openwrt/package/feeds/routing
+ln -s ../../../feeds/routing/amt amt
+cd ~openwrt
 make menuconfig
-(select new amt under Network/)
-make -j1 package/network/utils/amt/install V=s
+(select new amt under Network/Routing and Redirection)
+make -j1 package/feeds/routing/amt/install V=s
 
 see "installing-and-running.txt" for next steps.
 

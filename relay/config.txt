@@ -1,0 +1,17 @@
+DataInterface (str from ifconfig)   [required] (--interface, -c) (interface to listen for multicast data on)
+RelayFamily (inet|inet6)            [default: inet] (--net-relay, -n)
+TunnelFamily (inet|inet6)           [default: inet] (--tun-relay, -l)
+RelayUrlPort (uint16)               [default: 8080] (--port, -p) (responds to http from localhost, reporting stats)
+AmtPort (uint16)                    [default: 2268] (--amt-port, -b) (* required by RFC 7450, maybe shouldn't be configurable?)
+DiscoveryAddr (ip)                  [default: 192.53.193.1 or 2001:3::1] (--anycast, -a) (address to listen for discovery requests)
+TunnelAddr (ip)                     [default: 0.0.0.0 or ::] (--tunnel-addr, -s) (source address for membership queries within tunnel)
+DataPort (uint16|"all")             [default: all] (--non-raw, -w) If any values are here besides 'all', Data sockets are non-raw (doesn't require root). Can be specified multiple times to get multiple sockets.
+DequeueLen (uint)                   [default: 10] (--queue-length, -q) Process this many packets before a context switch or stepping to lower priority of queue (request and reports are high, data medium, and discovery low)
+DebugLevel (0|1)                    [default: 0] (--debug, -d) Turn on Debug messages
+ExternalData (0|1)                  [default: 0] (--external, -e) Don't recompute iph checksum, they're already valid. (default assumes they may be from loopback)
+SuppressICMP (0|1)                  [default: 0] (--icmp-suppress, -i) Run without listening for ICMP (doesn't require root)
+File (string, readable fname)       [/etc/amtrelayd.conf] (--file, -f) Read input config file.
+
+Deprecated:
+Queue Threshold (uint)              [default: 100] (--queue-thresh, -t) Ignored value for queueing delay, in ms
+
