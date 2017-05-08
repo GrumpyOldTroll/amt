@@ -447,6 +447,11 @@ relay_url_init(relay_instance* instance)
     int family = instance->relay_af;
     uint16_t port = instance->relay_url_port;
 
+    if (instance->relay_url_port == 0) {
+        fprintf(stderr, "Not starting RelayUrl socket for stats (RelayUrlPort=0)\n");
+        return;
+    }
+
     switch (instance->relay_af) {
         case AF_INET:
             salen = sizeof(sin);

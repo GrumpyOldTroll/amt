@@ -213,6 +213,11 @@ handle_amt_port(ConfigInput* input, const char* value)
 static int
 handle_url_port(ConfigInput* input, const char* value)
 {
+    fprintf(stderr, "handle_url_port: \"%s\"\n", value);
+    if (!strcmp(value, "none")) {
+        input->instance->relay_url_port = 0;
+        return 0;
+    }
     return handle_uint16(&input->instance->relay_url_port, value,
             "RelayUrlPort (-p/--port)");
 }
