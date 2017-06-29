@@ -205,7 +205,14 @@ icmp_recv(int fd, short flags, void* uap)
     // patext* pat;
     // gw_t* gw;
     const char* res;
-    const struct icmphdr* ih;
+#ifdef LINUX
+#define ICMPHDR icmphdr
+#define ICMP_TYPE(ic) ((ic)->type)
+#else
+#define ICMPHDR icmp
+#define ICMP_TYPE(ic) ((ic)->icmp_type)
+#endif
+    const struct ICMPHDR* ih;
     const struct ip* iph;
     u_int32_t dest;
 
@@ -219,18 +226,13 @@ icmp_recv(int fd, short flags, void* uap)
     }
 
     iph = (const struct ip*)buf;
-    ih = (const struct icmphdr*)(buf + iph->ip_hl * 4);
-#ifdef BSD
-#define ICMP_TYPE(ic) ((ic)->icmp_type)
-#else
-#define ICMP_TYPE(ic) ((ic)->type)
-#endif
+    ih = (const struct ICMPHDR*)(buf + iph->ip_hl * 4);
 
     switch (ICMP_TYPE(ih)) {
         case ICMP_UNREACH:
         case ICMP_SOURCEQUENCH:
             iph = (const struct ip*)(buf + iph->ip_hl * 4 +
-                                        sizeof(struct icmphdr));
+                                        sizeof(struct ICMPHDR));
             dest = iph->ip_dst.s_addr;
             break;
         default:
@@ -334,10 +336,10 @@ relay_signal_init(relay_instance* instance)
 
 int
 relay_socket_shared_init(int family,
-      struct sockaddr* bind_addr)
+      struct sockaddr* bind_addr, int debug)
 {
     int rc, val, len, sock;
-    char str[MAX_ADDR_STRLEN];
+    char str[MAX_SOCK_STRLEN];
 
     sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
@@ -354,32 +356,26 @@ relay_socket_shared_init(int family,
 
     if (bind_addr) {
         int bind_addr_len = 0;
-        void* addrp = bind_addr;
-        uint16_t port = 0;
         if (family == AF_INET) {
             bind_addr_len = sizeof(struct sockaddr_in);
             struct sockaddr_in* psa = (struct sockaddr_in*)bind_addr;
-            addrp = &psa->sin_addr;
-            port = psa->sin_port;
+            psa->sin_family = AF_INET;
         } else if (family == AF_INET6) {
             bind_addr_len = sizeof(struct sockaddr_in6);
             struct sockaddr_in6* psa = (struct sockaddr_in6*)bind_addr;
-            addrp = &psa->sin6_addr;
-            port = psa->sin6_port;
+            psa->sin6_family = AF_INET6;
         }
         rc = bind(sock, bind_addr, bind_addr_len);
         if (rc < 0) {
-            fprintf(stderr, "error binding socket (%s:%u): %s\n",
-                    inet_ntop(family, addrp, str, sizeof(str)),
-                    htons(port), strerror(errno));
+            fprintf(stderr, "error binding socket to %s: %s\n",
+                    sock_ntop(family, bind_addr, str, sizeof(str)),
+                    strerror(errno));
             exit(1);
         }
-        /*
-        fprintf(stderr, "bound udp socket (%s :%u/%u): %s\n",
-                    inet_ntop(family, &bind_addr, str, sizeof(str)),
-                    htons(((struct sockaddr_in*)bind_addr)->sin_port),
-                    bind_addr_len, strerror(errno));
-        */
+        if (debug) {
+            fprintf(stderr, "bound udp socket %d %s\n", sock,
+                    sock_ntop(family, bind_addr, str, sizeof(str)));
+        }
     }
 
 /*
@@ -531,8 +527,15 @@ relay_anycast_socket_init(relay_instance* instance,
 {
     int rc;
 
+    {
+        char str[MAX_ADDR_STRLEN];
+        fprintf(stderr, "anycast listen_addr: %s\n",
+                sock_ntop(instance->relay_af, &instance->listen_addr,
+                    str, sizeof(str)));
+        fprintf(stderr, "%p\n%p\n", &instance->listen_addr, listen_addr);
+    }
     instance->relay_anycast_sock = relay_socket_shared_init(
-          instance->relay_af, listen_addr);
+          instance->relay_af, listen_addr, relay_debug(instance));
 
     instance->relay_anycast_ev = event_new(instance->event_base,
             instance->relay_anycast_sock, EV_READ | EV_PERSIST,
@@ -561,11 +564,20 @@ main(int argc, char** argv)
     relay_event_init(instance);
     relay_signal_init(instance);
 
+    {
+        char str[MAX_ADDR_STRLEN];
+        fprintf(stderr, "main listen_addr: %s\n",
+                sock_ntop(instance->relay_af, &instance->listen_addr,
+                    str, sizeof(str)));
+    }
     relay_anycast_socket_init(
           instance, (struct sockaddr*)&instance->listen_addr);
     relay_url_init(instance);
     if (!BIT_TEST(instance->relay_flags, RELAY_FLAG_NOICMP)) {
         relay_icmp_init(instance);
+    }
+    if (!BIT_TEST(instance->relay_flags, RELAY_FLAG_NONRAW)) {
+        relay_raw_socket_init(instance);
     }
 
     rc = event_base_dispatch(instance->event_base);

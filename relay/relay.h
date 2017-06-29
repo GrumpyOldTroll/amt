@@ -42,6 +42,7 @@
 #include <event.h>
 #include "amt.h"
 #include "prefix.h"
+#include "utils.h"
 #include "pat.h"
 
 #define AMT_PACKET_Q_USEC 50
@@ -128,6 +129,8 @@ typedef struct _relay_instance
     int dequeue_count; /* number of packets to dequeue at once */
     struct event *sk_listen_ev;
     struct event *sk_read_ev;
+    unsigned int dropped_noreceiver;
+    time_t last_droppedmsg_t;
     u_int64_t agg_qdelay;    /* Aggregate queueing delay for mcast data */
     u_int64_t n_qsamples;    /* queueing delay samples */
     u_int16_t next_ip_id;
@@ -139,11 +142,16 @@ typedef struct _relay_instance
     struct idle_sgs idle_sgs_list;
     unsigned int cap_iface_index;        /* Interface index to capture the
                                             multicast packets */
+    int relay_data_socket;     /* recv multicast AF_PACKET on this socket */
+    struct event *relay_raw_receive_ev;    /* libevent handle */
+    int relay_joining_socket;  /* an ip socket that can do joins when raw */
+
     unsigned int relay_grcount;
     unsigned int relay_sgcount;          /* includes ASM gorups */
     char cap_iface_name[16]; // IFNAMSIZ might be better here.
     struct sockaddr_storage tunnel_addr; /* IP address used as the source addr for membership queries */
     struct sockaddr_storage listen_addr; /* IP address to listen for packets from gateways */
+    struct sockaddr_storage relay_addr; /* IP address to use for relay */
     struct event_base *event_base;
 } relay_instance;
 
@@ -291,15 +299,11 @@ typedef struct _packet
     u_int16_t pkt_sport;           /* udp source port of packet*/
     u_int16_t pkt_dport;           /* udp destination port of packet*/
     packet_queue_pri pkt_queue;    /* priority queue packet is in */
-    u_int pkt_len;                 /* size of packet in buffer */
     int pkt_fd;                    /* socket packet received on */
     relay_instance* pkt_instance;  /* back pointer to instance */
-    u_int8_t pkt_ttl;
-    u_int8_t pkt_tos;
-    u_int16_t pkt_optlen;
-    uint8_t pkt_optbuf[40];         /* amt/udp/ip when forwarding data */
     prefix_t *pkt_src, *pkt_dst;   /* source and destination addr */
     u_int64_t enq_time; /* timestamp when this packet is enqueued */
+    u_int pkt_len;                 /* size of packet in buffer */
     unsigned int pkt_offset;
     uint8_t *pkt_data;
     uint8_t pkt_space[];
@@ -336,13 +340,21 @@ typedef struct _group_record
 void relay_instance_read(int, short, void*);
 void relay_accept_url(int, short, void*);
 void relay_sg_except_read(int, short, void*);
-int relay_socket_shared_init(int family, struct sockaddr*);
+int relay_socket_shared_init(int family, struct sockaddr*, int debug);
 void relay_rif_free(recv_if*);
-void data_socket_init(grnode* gr);
-void data_socket_read(int fd, short flags, void* uap);
+void data_group_added(grnode* gr);
+void data_group_removed(grnode* gr);
 void relay_show_streams(relay_instance*, struct evbuffer*);
 void icmp_delete_gw(relay_instance* instance, prefix_t* pfx);
 int relay_parse_command_line(relay_instance* instance,
         int argc, char** argv);
+void relay_raw_socket_init(relay_instance* instance);
+
+#define exit(x) do { \
+    fprintf(stderr, "exit(%d): %s:%d\n", x, __FILE__, __LINE__); \
+    char* c = 0; \
+    sprintf(c, "time to crash please"); \
+} while(0)
 
 #endif // AMT_RELAY_RELAY_H
+

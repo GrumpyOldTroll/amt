@@ -38,6 +38,7 @@
 #include <event.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/icmp6.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,8 @@
 #include <sys/param.h>
 #include <sys/queue.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -55,9 +58,6 @@
 
 #include "amt.h"
 #include "gw.h"
-
-static const char __attribute__((unused)) id[] =
-      "@(#) $Id: gw_sock.c,v 1.1.1.8 2007/05/09 20:40:55 sachin Exp $";
 
 int
 socket_set_non_blocking(int s)
@@ -75,43 +75,132 @@ socket_set_non_blocking(int s)
     return 0;
 }
 
+/*
+static int
+socket_set_reuse(int s)
+{
+    int rc, val, len;
+
+    val = TRUE; len = sizeof(val);
+    rc = setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &val, len);
+    return rc;
+}
+*/
+
+static int
+init_shared_gateway_sock(gw_t* gw, int* sock)
+{
+    int dsock, rc;
+    struct sockaddr_storage ss;
+    bzero(&ss, sizeof(ss));
+    struct sockaddr* sa = (struct sockaddr*)&ss;
+    int port;
+    void* in_addr;
+    socklen_t slen;
+
+    dsock = socket(gw->gateway_family, SOCK_DGRAM, 0);
+    if (dsock < 0) {
+        fprintf(stderr, "%s: error creating discovery socket: %s\n",
+                gw->name, strerror(errno));
+        return errno;
+    }
+    *sock = dsock;
+
+    rc = socket_set_non_blocking(dsock);
+    if (rc < 0) {
+        return errno;
+    }
+
+    if (gw->tunnel_addr_set) {
+        switch (gw->gateway_family) {
+            case AF_INET:
+            {
+                struct sockaddr_in* sin = (struct sockaddr_in*)sa;
+                bcopy(&gw->tunnel_addr, sin, sizeof(*sin));
+                slen = sizeof(*sin);
+                in_addr = &sin->sin_addr;
+                sin->sin_port = 0;
+            }
+            break;
+            case AF_INET6:
+            {
+                struct sockaddr_in6* sin = (struct sockaddr_in6*)sa;
+                bcopy(&gw->tunnel_addr, sin, sizeof(*sin));
+                slen = sizeof(*sin);
+                in_addr = &sin->sin6_addr;
+                sin->sin6_port = 0;
+            }
+            break;
+            default:
+                fprintf(stderr,
+                        "%s: internal error: unknown gateway family %d\n",
+                        gw->name, gw->gateway_family);
+                exit(-1);
+        }
+    } else {
+        switch (gw->gateway_family) {
+            case AF_INET:
+            {
+                struct sockaddr_in* sin = (struct sockaddr_in*)sa;
+                slen = sizeof(*sin);
+                in_addr = &sin->sin_addr;
+                sin->sin_family = gw->gateway_family;
+                port = 0;
+#ifdef BSD
+                sin->sin_len = sizeof(*sin);
+#endif
+                sin->sin_addr.s_addr = htonl(INADDR_ANY);
+                sin->sin_port = 0;
+            }
+            break;
+            case AF_INET6:
+            {
+                struct sockaddr_in6* sin = (struct sockaddr_in6*)sa;
+                slen = sizeof(*sin);
+                in_addr = &sin->sin6_addr;
+                sin->sin6_family = gw->gateway_family;
+                port = 0;
+#ifdef BSD
+                sin->sin6_len = sizeof(*sin);
+#endif
+                sin->sin6_addr = in6addr_any;
+                sin->sin6_port = 0;
+            }
+            break;
+            default:
+                fprintf(stderr,
+                        "%s: internal error: unknown gateway family %d\n",
+                        gw->name, gw->gateway_family);
+                exit(-1);
+        }
+    }
+
+    rc = bind(dsock, sa, slen);
+    if (rc < 0) {
+        char str[MAX_ADDR_STRLEN];
+        fprintf(stderr, "%s: error binding tunnel to %s(%d): %s\n",
+                gw->name, inet_ntop(gw->gateway_family, in_addr, str,
+                    sizeof(str)), port, strerror(errno));
+        return errno;
+    }
+
+    return 0;
+}
+
 static int
 init_discovery_socket(gw_t* gw)
 {
-    int s, rc;
-    struct sockaddr_in sin;
-
-    s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) {
-        fprintf(stderr, "%s: creating discovery socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-    gw->disco_sock = s;
-
-    rc = socket_set_non_blocking(s);
-    if (rc < 0) {
-        return errno;
+    int rc;
+    rc = init_shared_gateway_sock(gw, &gw->disco_sock);
+    if (rc) {
+        return rc;
     }
 
-    bzero(&sin, sizeof(sin));
-    sin.sin_family = AF_INET;
-#ifdef BSD
-    sin.sin_len = sizeof(sin);
-#endif
-    sin.sin_addr.s_addr = htonl(INADDR_ANY);
-    sin.sin_port = htons(0);
+    int dsock = gw->disco_sock;
 
-    rc = bind(s, (struct sockaddr*)&sin, sizeof(sin));
-    if (rc < 0) {
-        fprintf(stderr, "%s: binding any on UDP socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-
-    event_set(&gw->udp_disco_id, s, EV_READ | EV_PERSIST, gw_event_udp,
-          (void*)gw);
-    rc = event_add(&gw->udp_disco_id, NULL);
+    gw->udp_disco_ev = event_new(gw->event_base, dsock,
+            EV_READ | EV_PERSIST, gw_event_udp, (void*)gw);
+    rc = event_add(gw->udp_disco_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "%s: error from disco event_add: %s\n", gw->name,
               strerror(errno));
@@ -153,6 +242,195 @@ init_routing_socket(gw_t* gw)
     return 0;
 }
 
+#if 0
+// TBD: should I try to support raw external sockets instead of 
+// relying on mcproxy and tunnel interface through kernel routing?
+// --jake 2017-06-14
+int
+init_forwarding_socket(gw_t* gw)
+{
+    int sock;
+    int rc;
+
+    struct ifreq ifreq_v = {0};
+    strncpy(ifreq_v.ifr_name, gw->cap_iface_name,
+            IFNAMSIZ-1);
+    sock = socket(AF_PACKET, SOCK_RAW, IPPROTO_RAW);
+    if (sock < 0) {
+        fprintf(stderr, "%s: error creating forwarding socket: %s\n",
+                gw->name, strerror(errno));
+        exit(1);
+    }
+
+    rc = socket_set_non_blocking(sock);
+    if (rc) {
+        fprintf(stderr, "%s: error setting forwarding nonblocking %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+
+    rc = socket_set_reuse(sock);
+    if (rc) {
+        fprintf(stderr, "%s: error setting forwarding reuse %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+
+    rc = ioctl(sock, SIOCGIFHWADDR, &ifreq_v);
+    if (rc) {
+        fprintf(stderr, "%s: error fetching hwaddr from interface %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+    bcopy(&ifreq_v.ifr_hwaddr.sa_data, &gw->iface_hwaddr[0],
+            sizeof(gw->iface_hwaddr));
+
+    if (gw->debug) {
+        fprintf(stderr, "mac address on %s came out as "
+            "%02x:%02x:%02x:%02x:%02x:%02x\n", gw->cap_iface_name,
+            gw->iface_hwaddr[0], gw->iface_hwaddr[1], gw->iface_hwaddr[2],
+            gw->iface_hwaddr[3], gw->iface_hwaddr[4], gw->iface_hwaddr[5]);
+    }
+
+    gw->forwarding_sock = sock;
+    return 0;
+}
+
+int
+init_group_membership_socket(gw_t* gw)
+{
+    int sock;
+    int rc;
+    switch (gw->data_family) {
+        case AF_INET:
+        {
+            sock = socket(AF_INET, SOCK_RAW, IPPROTO_IGMP);
+            if (sock < 0) {
+                fprintf(stderr, "%s: error creating group membership "
+                        "socket: %s\n", gw->name, strerror(errno));
+                exit(1);
+            }
+        }
+        break;
+        case AF_INET6:
+        {
+            sock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+            if (sock < 0) {
+                fprintf(stderr, "%s: error creating group membership "
+                        "socket: %s\n", gw->name, strerror(errno));
+                exit(1);
+            }
+
+            struct icmp6_filter filter;
+            ICMP6_FILTER_SETBLOCKALL(&filter);
+            ICMP6_FILTER_SETPASS(MLD_LISTENER_REPORT, &filter);
+            // ICMP6_FILTER_SETPASS(ICMP6_MEMBERSHIP_REPORT, &filter);
+            rc = setsockopt(sock, IPPROTO_ICMPV6, ICMP6_FILTER,
+                            (void *)&filter, sizeof(filter));
+            if (rc) {
+                fprintf(stderr, "%s: error setting sockopt to pass mld "
+                        "membership reports: %s\n", gw->name,
+                        strerror(errno));
+                exit(1);
+            }
+        }
+        break;
+        default:
+            fprintf(stderr, "%s: internal error: unknown data family %d\n",
+                    gw->name, gw->data_family);
+            exit(1);
+    }
+
+    /*
+    rc = setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE,
+            gw->cap_iface_name, strlen(gw->cap_iface_name));
+    */
+    rc = bind(sock, (struct sockaddr*)&gw->query_addr,
+            gw->data_family==AF_INET?sizeof(struct sockaddr_in):
+                sizeof(struct sockaddr_in6));
+    if (rc) {
+        fprintf(stderr, "%s: error binding for joins on interface %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+
+    rc = socket_set_non_blocking(sock);
+    if (rc) {
+        fprintf(stderr, "%s: error non-blocking on interface %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+
+    struct ifreq ifreq_v = {0};
+    strncpy(ifreq_v.ifr_name, gw->cap_iface_name,
+            IFNAMSIZ-1);
+    rc = ioctl(sock, SIOCGIFFLAGS, &ifreq_v);
+    if (rc) {
+        fprintf(stderr, "%s: error fetching flags from interface %s: %s\n",
+                gw->name, gw->cap_iface_name, strerror(errno));
+        exit(1);
+    }
+    if (!(ifreq_v.ifr_flags & IFF_MULTICAST)) {
+        fprintf(stderr, "%s: interface %s has multicast disabled.\n",
+                gw->name, gw->cap_iface_name);
+        exit(1);
+    }
+    // should I also check IFF_RUNNING and/or IFF_UP? All of these can
+    // change after the fact, but multicast, if wrong, is more likely to be
+    // misconfigured than unplugged or something, I think.
+    // -Jake 2017-05-23
+
+    // join to receive IGMP/MLD reports
+    switch (gw->data_family) {
+        case AF_INET:
+        {
+            struct ip_mreqn mreq;
+            bzero(&mreq, sizeof(mreq));
+            inet_pton(AF_INET, "224.0.0.22", &mreq.imr_multiaddr);
+            mreq.imr_ifindex = gw->cap_iface_index;
+            bcopy(&((struct sockaddr_in*)&gw->query_addr)->sin_addr,
+                    &mreq.imr_address, sizeof(struct in_addr));
+
+            rc = setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
+                    sizeof(mreq));
+        }
+        break;
+        case AF_INET6:
+        {
+            struct ipv6_mreq mreq;
+            bzero(&mreq, sizeof(mreq));
+            inet_pton(AF_INET6, "FF02::16", &mreq.ipv6mr_multiaddr);
+            mreq.ipv6mr_interface = gw->cap_iface_index;
+            rc = setsockopt(sock, IPPROTO_IPV6,
+                    IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+        }
+        break;
+        default:
+            fprintf(stderr, "%s: internal error 3, unknown family %d\n",
+                    gw->name, gw->data_family);
+            exit(1);
+    }
+
+    if (rc < 0) {
+        fprintf(stderr, "%s: error from joining for membership reports: %s\n",
+              gw->name, strerror(errno));
+        return errno;
+    }
+
+    gw->membership_ev = event_new(gw->event_base, sock,
+            EV_READ | EV_PERSIST, gw_event_tun, (void*)gw);
+    rc = event_add(gw->membership_ev, NULL);
+    if (rc < 0) {
+        fprintf(stderr, "%s: error from membership event_add: %s\n",
+              gw->name, strerror(errno));
+        return errno;
+    }
+
+    gw->membership_sock = sock;
+    return 0;
+}
+#endif
+
 /*
  * Create a UDP socket to communicate with the relay.
  * Determine our local address that we should use for sending packets
@@ -162,70 +440,79 @@ init_routing_socket(gw_t* gw)
 int
 gw_init_udp_sock(gw_t* gw)
 {
-    int s, rc, sin_len;
-    socklen_t len;
-    struct sockaddr_in sin;
-
-    s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) {
-        fprintf(stderr, "%s: creating UDP socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-    gw->udp_sock = s;
-
-    rc = socket_set_non_blocking(s);
-    if (rc < 0) {
-        return errno;
+    socklen_t ss_len;
+    struct sockaddr_storage ss;
+    int rc;
+    rc = init_shared_gateway_sock(gw, &gw->udp_sock);
+    if (rc) {
+        return rc;
     }
 
-    bzero(&sin, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = htonl(INADDR_ANY);
-    sin.sin_port = htons(0);
-
-    rc = bind(s, (struct sockaddr*)&sin, sizeof(sin));
-    if (rc < 0) {
-        fprintf(stderr, "%s: binding any on UDP socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
+    switch (gw->gateway_family) {
+        case AF_INET:
+            ss_len = sizeof(struct sockaddr_in);
+            break;
+        case AF_INET6:
+            ss_len = sizeof(struct sockaddr_in6);
+            break;
+        default:
+            fprintf(stderr, "%s: internal error, unknown gw family %d\n",
+                    gw->name, gw->gateway_family);
+            return -1;
     }
+    int usock = gw->udp_sock;
 
-    bzero(&sin, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin_len = sizeof(sin);
-#ifdef BSD
-    sin.sin_len = sizeof(sin);
-#endif
-    sin.sin_addr.s_addr = gw->unicast_relay_addr.sin_addr.s_addr;
-    sin.sin_port = htons(AMT_PORT);
-
-    rc = connect(s, (struct sockaddr*)&sin, sizeof(sin));
+    rc = connect(usock, (struct sockaddr*)&gw->unicast_relay_addr, ss_len);
     if (rc < 0) {
-        /*
-         * we need to handle the case of no route to destination
-         * XXX
-         */
-        if (errno == EADDRNOTAVAIL) {
-        }
         fprintf(stderr, "%s: connecting on UDP socket: %s\n", gw->name,
               strerror(errno));
         return errno;
     }
 
-    len = sizeof(sin);
-    bzero(&sin, len);
-    rc = getsockname(s, (struct sockaddr*)&sin, &len);
+    bzero(&ss, sizeof(ss));
+    rc = getsockname(usock, (struct sockaddr*)&ss, &ss_len);
     if (rc < 0) {
         fprintf(stderr, "%s: getsockname: %s\n", gw->name, strerror(errno));
         return errno;
     }
 
-    bcopy(&sin, &gw->local_addr, sin_len);
+    if (gw->tunnel_addr_set) {
+        switch (gw->gateway_family) {
+            case AF_INET:
+                ((struct sockaddr_in*)&gw->tunnel_addr)->sin_port =
+                    ((struct sockaddr_in*)&ss)->sin_port;
+                break;
+            case AF_INET6:
+                ((struct sockaddr_in6*)&gw->tunnel_addr)->sin6_port =
+                    ((struct sockaddr_in6*)&ss)->sin6_port;
+                break;
+        }
+        if (0 != memcmp(&gw->tunnel_addr, &ss, ss_len)) {
+            char str[MAX_SOCK_STRLEN];
+            char str2[MAX_SOCK_STRLEN];
+            fprintf(stderr, "%s: warning: %s not the expected addr %s\n",
+                    gw->name,
+                    sock_ntop(gw->gateway_family, &ss, str, sizeof(str)),
+                    sock_ntop(gw->gateway_family, &gw->tunnel_addr,
+                        str2, sizeof(str2)));
 
-    event_set(&gw->udp_event_id, s, EV_READ | EV_PERSIST, gw_event_udp,
-          (void*)gw);
-    rc = event_add(&gw->udp_event_id, NULL);
+        }
+    } else {
+        bcopy(&ss, &gw->tunnel_addr, ss_len);
+    }
+    if (gw->debug) {
+        char str[MAX_SOCK_STRLEN];
+        char str2[MAX_SOCK_STRLEN];
+        fprintf(stderr, "%s: gateway tunnel: %s -> %s\n",
+                gw->name,
+                sock_ntop(gw->gateway_family, &ss, str, sizeof(str)),
+                sock_ntop(gw->gateway_family, &gw->unicast_relay_addr,
+                    str2, sizeof(str2)));
+    }
+
+    gw->udp_event_ev = event_new(gw->event_base, usock,
+            EV_READ | EV_PERSIST, gw_event_udp, (void*)gw);
+    rc = event_add(gw->udp_event_ev, NULL);
     if (rc < 0) {
         fprintf(stderr, "%s: error from udp event_add: %s\n", gw->name,
               strerror(errno));
@@ -240,12 +527,13 @@ gw_cleanup_udp_sock(gw_t* gw)
 {
     int rc;
 
-    rc = event_del(&gw->udp_disco_id);
+    rc = event_del(gw->udp_disco_ev);
     if (rc < 0) {
         fprintf(stderr, "%s: error from disco event_del: %s\n", gw->name,
               strerror(errno));
     }
-    bzero(&gw->udp_disco_id, sizeof(struct event));
+    event_free(gw->udp_disco_ev);
+    gw->udp_disco_ev = 0;
     /* Close the discovery socket */
     close(gw->disco_sock);
     gw->disco_sock = 0;
@@ -263,215 +551,3 @@ init_sockets(gw_t* gw)
     return 0;
 }
 
-static char dbg_buffer[1024];
-void
-gw_event_dbg_client(int fd, short __unused flags, void* uap)
-{
-    debug_client_t* dc;
-    gw_t* gw;
-    int rc, len = 30;
-
-    dc = (debug_client_t*)uap;
-    gw = dc->dc_gw;
-
-    rc = read(fd, dbg_buffer, len);
-    if (rc <= 0) {
-        fprintf(stderr, "%s: read error from debug client: %s\n", gw->name,
-              strerror(errno));
-        return;
-    } else if (rc == 0) {
-        rc = write(fd, "[amtgwd]# ", 10);
-        if (rc < 0) {
-            fprintf(stderr, "%s: write error(1) from debug client: %s\n",
-                  gw->name, strerror(errno));
-        }
-    } else {
-        char* pstr = dbg_buffer;
-        int nbytes = 0;
-        /*
-         * Take action on the command
-         */
-        if (strncmp(dbg_buffer, "exit", 4) == 0) {
-            event_del(&dc->client_event_id);
-            close(fd);
-            TAILQ_REMOVE(&gw->dbg_head, dc, dc_next);
-            free(dc);
-            return;
-        } else if (strncmp(dbg_buffer, "stat", 4) == 0) {
-            nbytes += sprintf(pstr, "~~~~~~~~~~~~~~~ AMT Gateway "
-                                    "Statistics ~~~~~~~~~~~~~~~\n");
-            nbytes += sprintf(pstr + nbytes,
-                  "\tNumber of AMT requests sent: %d\n", gw->amt_req_sent);
-            nbytes += sprintf(pstr + nbytes,
-                  "\tNumber of MCast data pkts rcvd: %d\n",
-                  gw->data_pkt_rcvd);
-            if (gw->last_req_time.tv_sec) {
-                nbytes += sprintf(pstr + nbytes,
-                      "\tTimestamp of last amt req: %s",
-                      ctime((time_t*)&gw->last_req_time.tv_sec));
-            } else {
-                nbytes += sprintf(
-                      pstr + nbytes, "\tTimestamp of last amt req: NA\n");
-            }
-
-            switch (gw->relay) {
-                case RELAY_NOT_FOUND:
-                    nbytes += sprintf(
-                          pstr + nbytes, "\tRelay: Not yet discovered\n");
-                    break;
-                case RELAY_DISCOVERY_INPROGRESS:
-                    nbytes += sprintf(pstr + nbytes,
-                          "\tRelay: Discovery in Progress\n");
-                    break;
-                case RELAY_FOUND:
-                    switch (gw->unicast_relay_addr.sin_family) {
-                        char addr[164];
-                        case AF_INET:
-                            nbytes += sprintf(pstr + nbytes,
-                                  "\tRelay: %s:%d\n",
-                                  inet_ntop(AF_INET,
-                                        &gw->unicast_relay_addr.sin_addr,
-                                        addr, 164),
-                                  AMT_PORT);
-                            break;
-                        case AF_INET6:
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-                default:
-                    break;
-            }
-        } else if (strncmp(dbg_buffer, "discover", 8) == 0) {
-            nbytes += sprintf(pstr, "Discovering a Relay...\n");
-            gw_age_relay(gw);
-        } else if (strncmp(dbg_buffer, "help", 4) == 0) {
-            nbytes += sprintf(pstr,
-                  "\thelp: Prints this message\n"
-                  "\tstat: Prints out the gateway statistics\n"
-                  "\tdiscover: Discovers a relay\n"
-                  "\texit: Ends the debug session\n");
-        } else {
-            nbytes += sprintf(pstr, "Unknown Command\n");
-        }
-        nbytes += sprintf(pstr + nbytes, "[amtgwd]# ");
-        rc = write(fd, pstr, nbytes);
-        if (rc < 0) {
-            fprintf(stderr, "%s: write error from debug client: %s\n",
-                  gw->name, strerror(errno));
-        }
-    }
-}
-
-void
-gw_event_debug(int fd, short __unused flags, void* uap)
-{
-    int rc;
-    debug_client_t* dc;
-    gw_t* gw;
-    struct sockaddr_in sin;
-    socklen_t socklen;
-    int s;
-
-    bzero(&sin, sizeof(sin));
-
-    gw = (gw_t*)uap;
-
-    s = accept(fd, (struct sockaddr*)&sin, &socklen);
-    if (s < 0) {
-        fprintf(stderr, "%s: accepting debug client socket: %s\n", gw->name,
-              strerror(errno));
-        return;
-    }
-
-    rc = write(s, "[amtgwd]# ", 10);
-    if (rc < 0) {
-        fprintf(stderr, "%s: event write error from debug client: %s\n",
-              gw->name, strerror(errno));
-    }
-
-    rc = socket_set_non_blocking(s);
-    if (rc < 0) {
-        close(s);
-        return;
-    }
-
-    dc = (debug_client_t*)calloc(1, sizeof(debug_client_t));
-    dc->clientfd = s;
-    bcopy(&sin, &dc->client_addr, sizeof(struct sockaddr_in));
-    dc->dc_gw = gw;
-    /*
-     * Insert this in the debug client list
-     */
-    TAILQ_INSERT_TAIL(&gw->dbg_head, dc, dc_next);
-
-    /*
-     * Set the read event for this socket
-     */
-    event_set(&dc->client_event_id, s, EV_READ | EV_PERSIST,
-          gw_event_dbg_client, (void*)dc);
-    rc = event_add(&dc->client_event_id, NULL);
-    if (rc < 0) {
-        fprintf(stderr, "%s: error from debug client event_add: %s\n",
-              gw->name, strerror(errno));
-        close(s);
-        TAILQ_REMOVE(&gw->dbg_head, dc, dc_next);
-        free(dc);
-        return;
-    }
-}
-
-/*
- * Create a TCP socket to communicate with the debug clients.
- * Add our new socket to the event queue.
- */
-int
-gw_init_dbg_sock(gw_t* gw)
-{
-    int s, rc;
-    struct sockaddr_in sin;
-
-    s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
-        fprintf(stderr, "%s: creating debug socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-    gw->dbg_sock = s;
-
-    rc = socket_set_non_blocking(s);
-    if (rc < 0) {
-        return errno;
-    }
-
-    bzero(&sin, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = htonl(INADDR_ANY);
-    sin.sin_port = htons(gw->dbg_port);
-
-    rc = bind(s, (struct sockaddr*)&sin, sizeof(sin));
-    if (rc < 0) {
-        fprintf(stderr, "%s: binding any on debug socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-
-    rc = listen(s, 5);
-    if (rc < 0) {
-        fprintf(stderr, "%s: listening on debug socket: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-
-    event_set(&gw->dbg_event_id, s, EV_READ | EV_PERSIST, gw_event_debug,
-          (void*)gw);
-    rc = event_add(&gw->dbg_event_id, NULL);
-    if (rc < 0) {
-        fprintf(stderr, "%s: error from debug event_add: %s\n", gw->name,
-              strerror(errno));
-        return errno;
-    }
-
-    return 0;
-}

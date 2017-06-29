@@ -40,7 +40,6 @@
 #include <sys/time.h>
 #include <assert.h>
 #include <event.h>
-//#include <netinet/igmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +47,6 @@
 #include "igmp.h"  // copied from freebsd--linux doesn't have v3 in 2017
 #include "amt.h"
 #include "gw.h"
-#include "in_cksum.h"
 
 static const char __attribute__((unused)) id[] =
       "@(#) $Id: gw_udp.c,v 1.1.1.9 2007/05/31 17:22:04 sachin Exp $";
@@ -74,8 +72,12 @@ gw_request_free(request_t* rq)
     /*
      * stop the request timer
      */
-    if (evtimer_pending(&rq->rq_timer, NULL)) {
-        evtimer_del(&rq->rq_timer);
+    if (rq->rq_tev) {
+        if (evtimer_pending(rq->rq_tev, NULL)) {
+            evtimer_del(rq->rq_tev);
+        }
+        event_free(rq->rq_tev);
+        rq->rq_tev = 0;
     }
 
     /*
@@ -181,20 +183,24 @@ gw_request_timeout(int fd, short __unused event, void* uap)
         gw->relay = RELAY_DISCOVERY_INPROGRESS;
         TAILQ_FOREACH(rq, &gw->request_head, rq_next)
         {
-            if (evtimer_pending(&rq->rq_timer, NULL)) {
+            if (rq->rq_tev && evtimer_pending(rq->rq_tev, NULL)) {
                 gw_request_free(rq);
             }
         }
         /*
          * start a periodic relay discovery timer
          */
-        if (evtimer_pending(&gw->discovery_timer, NULL)) {
-            evtimer_del(&gw->discovery_timer);
+        if (!gw->discovery_tev) {
+            gw->discovery_tev = evtimer_new(gw->event_base,
+                    gw_send_discovery, gw);
+        } else {
+            if (evtimer_pending(gw->discovery_tev, NULL)) {
+                evtimer_del(gw->discovery_tev);
+            }
         }
         timerclear(&tv);
         tv.tv_sec = GW_DISCOVERY_OFFSET;
-        evtimer_set(&gw->discovery_timer, gw_send_discovery, gw);
-        rc = evtimer_add(&gw->discovery_timer, &tv);
+        rc = evtimer_add(gw->discovery_tev, &tv);
         if (rc < 0) {
             fprintf(stderr, "%s: can't initialize discovery timer: %s\n",
                   gw->name, strerror(errno));
@@ -210,7 +216,7 @@ gw_request_timeout(int fd, short __unused event, void* uap)
     timerclear(&tv);
 
     tv.tv_sec = 1 << (rq->rq_count - 1);
-    rc = evtimer_add(&rq->rq_timer, &tv);
+    rc = evtimer_add(rq->rq_tev, &tv);
     if (rc < 0) {
         fprintf(stderr, "%s: can't reset request timer: %s\n", gw->name,
               strerror(errno));
@@ -233,8 +239,8 @@ gw_relay_found(gw_t* gw)
     /*
      * stop the discovery timer
      */
-    if (evtimer_pending(&gw->discovery_timer, NULL)) {
-        evtimer_del(&gw->discovery_timer);
+    if (evtimer_pending(gw->discovery_tev, NULL)) {
+        evtimer_del(gw->discovery_tev);
     }
 
     /*
@@ -253,8 +259,10 @@ gw_relay_found(gw_t* gw)
 
         timerclear(&tv);
         tv.tv_sec = 0; /* expire immediately */
-        evtimer_set(&rq->rq_timer, gw_request_timeout, rq);
-        rc = evtimer_add(&rq->rq_timer, &tv);
+        if (!rq->rq_tev) {
+            rq->rq_tev = evtimer_new(gw->event_base, gw_request_timeout, rq);
+        }
+        rc = evtimer_add(rq->rq_tev, &tv);
         if (rc < 0) {
             fprintf(stderr, "%s: can't initialize request timer: %s\n",
                   gw->name, strerror(errno));
@@ -265,14 +273,13 @@ gw_relay_found(gw_t* gw)
 
 void
 gw_send_discovery(int fd, short event, void* uap)
-
 {
     gw_t* gw;
     int rc, tries, len;
     u_int8_t* cp;
     u_int32_t nonce;
     struct timeval tv;
-    int sin_len;
+    int sin_len = 0;
 
     gw = (gw_t*)uap;
     if (!gw) {
@@ -289,7 +296,7 @@ gw_send_discovery(int fd, short event, void* uap)
 
     timerclear(&tv);
     tv.tv_sec = GW_DISCOVERY_INTERVAL;
-    rc = evtimer_add(&gw->discovery_timer, &tv);
+    rc = evtimer_add(gw->discovery_tev, &tv);
     if (rc < 0) {
         fprintf(stderr, "can't re-initialize discovery timer: %s\n",
               strerror(errno));
@@ -310,17 +317,18 @@ gw_send_discovery(int fd, short event, void* uap)
 
     len = cp - (u_int8_t*)gw->packet_buffer;
 
+    if (gw->gateway_family == AF_INET) {
+        sin_len = sizeof(struct sockaddr_in);
+    } else if (gw->gateway_family == AF_INET6) {
+        sin_len = sizeof(struct sockaddr_in6);
+    }
+
     tries = 3;
     while (tries--) {
         ssize_t size;
 
-#ifdef BSD
-        sin_len = gw->anycast_relay_addr.sin_len;
-#else
-        sin_len = sizeof(struct sockaddr_in);
-#endif
         size = sendto(gw->disco_sock, gw->packet_buffer, len, MSG_DONTWAIT,
-              (struct sockaddr*)&gw->anycast_relay_addr, sin_len);
+              (struct sockaddr*)&gw->discovery_addr, sin_len);
         if (size < 0) {
             switch (errno) {
                 case EINTR:
@@ -328,9 +336,15 @@ gw_send_discovery(int fd, short event, void* uap)
                     break;
 
                 default:
-                    fprintf(stderr, "%s: discovery sendto: %s\n", gw->name,
-                          strerror(errno));
+                {
+                    char str[MAX_SOCK_STRLEN];
+                    fprintf(stderr, "%s: discovery sendto(%d -> %s): %s\n",
+                            gw->name, gw->disco_sock,
+                            sock_ntop(gw->gateway_family,
+                                &gw->discovery_addr, str, sizeof(str)),
+                            strerror(errno));
                     return;
+                }
             }
         } else if (size != len) {
             fprintf(stderr, "%s: discovery short write %d out of %d\n",
@@ -355,7 +369,7 @@ gw_recv_advertisement(gw_t* gw, u_int8_t* cp, int len)
     /*
      * If the discovery timer isn't running, then ignore the advertisement
      */
-    if (!evtimer_pending(&gw->discovery_timer, NULL)) {
+    if (!evtimer_pending(gw->discovery_tev, NULL)) {
         fprintf(stderr,
               "%s: received advertisement but no discovery active.\n",
               gw->name);
@@ -374,25 +388,47 @@ gw_recv_advertisement(gw_t* gw, u_int8_t* cp, int len)
      * XXX v4 specific, make family independent
      */
     if (gw->anycast_relay_nonce == nonce) {
-        struct sockaddr_in* sin;
-
-        if (len < sizeof(struct in_addr)) {
-            fprintf(stderr, "%s: advertisement too short.\n", gw->name);
-            return;
-        }
-        sin = &gw->unicast_relay_addr;
-        bzero(sin, sizeof(struct sockaddr_in));
-        sin->sin_family = AF_INET;
+        if (gw->gateway_family == AF_INET) {
+            if (len < sizeof(struct in_addr)) {
+                fprintf(stderr, "%s: advertisement too short. "
+                        "(%d bytes for %d-byte addr)\n", gw->name, len,
+                        (int)sizeof(struct in_addr));
+                return;
+            }
+            struct sockaddr_in* sin =
+                (struct sockaddr_in*)&gw->unicast_relay_addr;
+            bzero(sin, sizeof(struct sockaddr_in));
+            sin->sin_family = AF_INET;
 #ifdef BSD
-        sin->sin_len = sizeof(struct sockaddr_in);
+            sin->sin_len = sizeof(struct sockaddr_in);
 #endif
-        sin->sin_addr.s_addr = get_long_native(cp);
-        cp += sizeof(u_int32_t);
-        len -= sizeof(u_int32_t);
+            sin->sin_port = htons(AMT_PORT);
+            bcopy(cp, &sin->sin_addr, sizeof(struct in_addr));
+            cp += sizeof(struct in_addr);
+            len -= sizeof(struct in_addr);
+        } else if (gw->gateway_family == AF_INET6) {
+            if (len < sizeof(struct in6_addr)) {
+                fprintf(stderr, "%s: advertisement too short. "
+                        "(%d bytes for %d-byte addr)\n", gw->name, len,
+                        (int)sizeof(struct in6_addr));
+                return;
+            }
+            struct sockaddr_in6* sin =
+                (struct sockaddr_in6*)&gw->unicast_relay_addr;
+            bzero(sin, sizeof(struct sockaddr_in6));
+            sin->sin6_family = AF_INET6;
+#ifdef BSD
+            sin->sin6_len = sizeof(struct sockaddr_in6);
+#endif
+            sin->sin6_port = htons(AMT_PORT);
+            bcopy(cp, &sin->sin6_addr, sizeof(struct in6_addr));
+            cp += sizeof(struct in6_addr);
+            len -= sizeof(struct in6_addr);
+        }
 
         if (len) {
             fprintf(stderr,
-                  "%s: extra %d octets at end of advertisement.\n",
+                  "%s: warning: extra %d octets at end of advertisement.\n",
                   gw->name, len);
         }
 
@@ -492,7 +528,8 @@ gw_query_timeout(int fd, short __unused event, void* uap)
     gw_t* gw = (gw_t*)uap;
 
     /* Send the query over TUN */
-    gw_forward_tun(gw, gw->query_buffer, gw->query_len);
+    // gw_forward_tun(gw, gw->query_buffer, gw->query_len);
+    gw_send_local_membership_query(gw);
 }
 #endif
 
@@ -556,55 +593,87 @@ gw_recv_query(gw_t* gw, u_int8_t* cp, int len)
      * Start a timer based on QQIC. If the timer has already started then
      * dont do anything.
      */
-    if (len > 0 && !evtimer_pending(&gw->query_timer, NULL)) {
-        struct ip* iph;
-        struct igmpv3* igmpq = NULL;
-        int qqi, mrt, rc, hlen, plen;
-        struct timeval tv;
+    if (len > 0 &&
+            (!gw->query_tev || !evtimer_pending(gw->query_tev, NULL))) {
+        int qqi = 5, mrt = 1;
+        int rc;
+        switch (gw->data_family) {
+            case AF_INET:
+            {
+                struct ip* iph;
+                struct igmpv3* igmpq = NULL;
+                int plen, hlen;
 
-        iph = (struct ip*)cp;
-        hlen = iph->ip_hl << 2;
-        plen = ntohs(iph->ip_len);
+                iph = (struct ip*)cp;
+                hlen = iph->ip_hl << 2;
+                plen = ntohs(iph->ip_len);
+                if (plen != len) {
+                    fprintf(stderr, "%s: warning: ip len %d in query != "
+                            "packet len %d from ip\n", gw->name, plen, len);
+                }
 
-        switch (iph->ip_p) {
-            case IPPROTO_IGMP:
-                igmpq = (struct igmpv3*)((u_int8_t*)iph + hlen);
-                switch (igmpq->igmp_type) {
-                    case IGMP_HOST_MEMBERSHIP_QUERY:
-                        qqi = AMT_IGMP_QQIC_TO_QQI(igmpq->igmp_qqi);
-                        mrt = AMT_IGMP_MRC_TO_MRT(igmpq->igmp_code);
+                switch (iph->ip_p) {
+                    case IPPROTO_IGMP:
+                        igmpq = (struct igmpv3*)((u_int8_t*)iph + hlen);
+                        switch (igmpq->igmp_type) {
+                            case IGMP_HOST_MEMBERSHIP_QUERY:
+                                qqi = AMT_IGMP_QQIC_TO_QQI(igmpq->igmp_qqi);
+                                mrt = AMT_IGMP_MRC_TO_MRT(igmpq->igmp_code);
 
-                        bcopy(cp, gw->query_buffer, plen);
-                        gw->query_len = plen;
-
-                        /*
-                         *	set an early timeout so that we can send the
-                         *	AMT request in time
-                         */
-                        timerclear(&tv);
-                        tv.tv_sec = qqi - mrt;
-                        evtimer_set(&gw->query_timer, gw_query_timeout, gw);
-                        rc = evtimer_add(&gw->query_timer, &tv);
-                        if (rc < 0) {
-                            fprintf(stderr,
-                                  "%s: can't reset query timer: %s\n",
-                                  gw->name, strerror(errno));
-                            exit(1);
+                                break;
+                            default:
+                                fprintf(stderr,
+                                      "%s: Unknown IGMP message in AMT query\n",
+                                      gw->name);
+                                return;
                         }
                         break;
+
                     default:
                         fprintf(stderr,
-                              "%s: Unknown IGMP message in AMT query\n",
+                              "%s: Unknown payload in the AMT membership query\n",
                               gw->name);
-                        break;
+                        return;
                 }
-                break;
-
+            }
+            break;
+            case AF_INET6:
+            {
+                // TBD: parse the qqi and mrt properly to decide when
+                // to send a query.
+            }
+            break;
             default:
-                fprintf(stderr,
-                      "%s: Unknown payload in the AMT membership query\n",
-                      gw->name);
-                break;
+                fprintf(stderr, "%s: internal error: unknown data family "
+                        "in recv_query\n", gw->name);
+                return;
+        }
+
+        if (len > sizeof(gw->query_buffer)) {
+            fprintf(stderr, "%s: query packet len %d too large to buffer "
+                    "(%d)\n", gw->name, len, (int)sizeof(gw->query_buffer));
+            return;
+        }
+        bcopy(cp, gw->query_buffer, len);
+        gw->query_len = len;
+
+        /*
+         *	set an early timeout so that we can send the
+         *	AMT request in time
+         */
+        struct timeval tv;
+        timerclear(&tv);
+        tv.tv_sec = qqi - mrt;
+        if (!gw->query_tev) {
+            gw->query_tev = evtimer_new(gw->event_base,
+                    gw_query_timeout, gw);
+        }
+        rc = evtimer_add(gw->query_tev, &tv);
+        if (rc < 0) {
+            fprintf(stderr,
+                  "%s: can't reset query timer: %s\n",
+                  gw->name, strerror(errno));
+            exit(1);
         }
     }
 
@@ -624,9 +693,9 @@ gw_receive_udp(gw_t* gw, int fd)
 {
     u_int8_t* cp;
     int tries;
+    struct sockaddr_storage from;
     socklen_t fromlen;
     ssize_t recv_len = -1;
-    struct sockaddr from;
 
     tries = 3;
     while (tries-- && (recv_len < 0)) {
@@ -636,8 +705,9 @@ gw_receive_udp(gw_t* gw, int fd)
          * sent the discovery to. This is to get back through a firewall.
          * The real 'from' address is the relay address inside the packet.
          */
+        fromlen = sizeof(from);
         recv_len = recvfrom(fd, gw->packet_buffer,
-              sizeof(gw->packet_buffer), 0, &from, &fromlen);
+              sizeof(gw->packet_buffer), 0, (struct sockaddr*)&from, &fromlen);
         if (recv_len < 0) {
             switch (errno) {
                 case EINTR: /* interrupted. retry. */
@@ -678,22 +748,15 @@ gw_receive_udp(gw_t* gw, int fd)
     cp = gw->packet_buffer;
 
     switch (*cp) {
-        case AMT_RELAY_DISCOVERY:
-            break;
 
         case AMT_RELAY_ADVERTISEMENT:
             gw_recv_advertisement(gw, cp, recv_len);
-            break;
-
-        case AMT_REQUEST:
             break;
 
         case AMT_MEMBERSHIP_QUERY:
             gw_recv_query(gw, cp, recv_len);
             break;
 
-        case AMT_MEMBERSHIP_CHANGE:
-            break;
 
         case AMT_MCAST_DATA:
             /* Draft 07 changes */
@@ -705,6 +768,13 @@ gw_receive_udp(gw_t* gw, int fd)
 
             gw->data_pkt_rcvd++;
 
+            break;
+
+        case AMT_RELAY_DISCOVERY:
+        case AMT_REQUEST:
+        case AMT_MEMBERSHIP_CHANGE:
+            fprintf(stderr, "%s: gateway received unexpected AMT type %d\n",
+                  gw->name, *cp);
             break;
 
         default:
@@ -749,7 +819,11 @@ gw_request_start(gw_t* gw, u_int8_t* cp, int len)
      * If the discovery timer is running,
      * then schedule the request to be sent out after relay is discovered
      */
-    if ((rc = evtimer_pending(&gw->discovery_timer, NULL)) ||
+    if (!gw->discovery_tev) {
+        gw->discovery_tev = evtimer_new(gw->event_base,
+                gw_send_discovery, gw);
+    }
+    if ((rc = evtimer_pending(gw->discovery_tev, NULL)) ||
           gw->relay == RELAY_DISCOVERY_INPROGRESS) {
         return;
     }
@@ -767,11 +841,14 @@ gw_request_start(gw_t* gw, u_int8_t* cp, int len)
      * if the request timer isn't already running,
      * create a timer to send the initial request and subsequent retries
      */
-    if (!evtimer_pending(&rq->rq_timer, NULL)) {
+    if (!rq->rq_tev) {
+        rq->rq_tev = evtimer_new(gw->event_base, gw_request_timeout, rq);
+    }
+    if (!evtimer_pending(rq->rq_tev, NULL)) {
         timerclear(&tv);
         tv.tv_sec = 0; /* expire immediately */
-        evtimer_set(&rq->rq_timer, gw_request_timeout, rq);
-        rc = evtimer_add(&rq->rq_timer, &tv);
+
+        rc = evtimer_add(rq->rq_tev, &tv);
         if (rc < 0) {
             fprintf(stderr, "%s: can't initialize request timer: %s\n",
                   gw->name, strerror(errno));
@@ -779,3 +856,4 @@ gw_request_start(gw_t* gw, u_int8_t* cp, int len)
         }
     }
 }
+

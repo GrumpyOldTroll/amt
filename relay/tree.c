@@ -210,6 +210,8 @@ membership_leave(sgnode* sg)
                 /* family2level(instance->relay_af) */,
                 MCAST_LEAVE_GROUP, &greq, sizeof(greq));
 
+        data_group_removed(gr);
+
         if (rc < 0) {
             fprintf(stderr, "error MCAST_LEAVE_GROUP sg socket: %s\n",
                   strerror(errno));
@@ -261,6 +263,8 @@ membership_leave(sgnode* sg)
                   strerror(errno));
             exit(1);
         }
+
+        data_group_removed(gr);
     }
 
     return 0;
@@ -401,7 +405,9 @@ clean_after_gwdelete(sgnode* sg)
                     event_free(gv->gv_receive_ev);
                     gv->gv_receive_ev = NULL;
                 }
-                close(gv->gv_socket);
+                if (gv->gv_socket != instance->relay_joining_socket) {
+                    close(gv->gv_socket);
+                }
                 gv->gv_socket = 0;
             }
             pat_delete(&instance->relay_groot,
@@ -805,7 +811,7 @@ membership_tree_refresh(relay_instance* instance,
                   pkt->pkt_dport);
 
             if (new_group) {
-                data_socket_init(gr);
+                data_group_added(gr);
             }
             if (new_source) {
                 membership_join(sg);
@@ -910,6 +916,7 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
     instance->n_qsamples += 1;
 
     /*
+    {
     uint8_t* cp = pkt->pkt_data;
     if (relay_debug(instance)) {
         printf("%02x%02x%02x%02x %02x%02x%02x%02x "
@@ -922,6 +929,7 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
                cp[24],cp[25],cp[26],cp[27],cp[28],cp[29],cp[30],cp[31],
                pkt->pkt_len, gw);
     }
+    }
     */
 
     tries = 3;
@@ -930,7 +938,7 @@ relay_forward_gw(sgnode* sg, gw_t* gw, packet* pkt)
             static unsigned int data_pkts_sent = 0;
             if (data_pkts_sent % 1000 == 0) {
                 fprintf(stderr, "Sending %s data packet %u len %d from "
-                                "%s:%u to %s:%u\n",
+                                "%s(%u) to %s(%u)\n",
                       (pkt->pkt_af == AF_INET) ? "INET" : "INET6",
                       data_pkts_sent, pkt->pkt_len,
                       prefix2str(pkt->pkt_src, str1, sizeof(str1)),
@@ -1008,11 +1016,7 @@ forward_mcast_data(packet* pkt, sgnode* sg)
               &sg->sg_gwroot, pat_key_get(pat), pat_keysize_get(pat));
     }
 }
-/*
- * FreeBSD currently does not support IGMPv3 so all memberships
- * will just use the group address and not the source.
- * In the future, support will be added for group and source forwarding.
- */
+
 void
 relay_forward(packet* pkt)
 {
@@ -1036,6 +1040,39 @@ relay_forward(packet* pkt)
         }
         if (gr->gr_asmnode) {
             forward_mcast_data(pkt, gr->gr_asmnode);
+        }
+        if (!pat && !gr->gr_asmnode) {
+            if (relay_debug(instance)) {
+                instance->dropped_noreceiver++;
+                struct timeval tv;
+                gettimeofday(&tv, NULL);
+                if (tv.tv_sec - instance->last_droppedmsg_t > 5) {
+                    instance->last_droppedmsg_t = tv.tv_sec;
+                    char str[MAX_ADDR_STRLEN];
+                    char str2[MAX_ADDR_STRLEN];
+                    fprintf(stderr, "%u packets dropped: (no pat to "
+                            "forward asm or source %s (%s)\n",
+                            instance->dropped_noreceiver,
+                            prefix2str(pkt->pkt_dst, str, sizeof(str)),
+                            prefix2str(pkt->pkt_src, str2, sizeof(str2)));
+                    instance->dropped_noreceiver = 0;
+                }
+            }
+        }
+    } else {
+        if (relay_debug(instance)) {
+            instance->dropped_noreceiver++;
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            if (tv.tv_sec - instance->last_droppedmsg_t > 5) {
+                instance->last_droppedmsg_t = tv.tv_sec;
+                char str[MAX_ADDR_STRLEN];
+                fprintf(stderr, "%u packets dropped: (no pat group "
+                        "to forward %s)\n",
+                        instance->dropped_noreceiver,
+                        prefix2str(pkt->pkt_dst, str, sizeof(str)));
+                instance->dropped_noreceiver = 0;
+            }
         }
     }
 }

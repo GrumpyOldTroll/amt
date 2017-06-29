@@ -50,9 +50,11 @@
 #define INET_HOST_LEN 32
 #define INET6_HOST_LEN 128
 
+/*
 #define INET_MAX_ADDR_STRLEN 16
 #define INET6_MAX_ADDR_STRLEN 40
 #define MAX_ADDR_STRLEN INET6_MAX_ADDR_STRLEN
+*/
 
 typedef struct inm_addr
 {

@@ -54,19 +54,12 @@
 static const char __attribute__((unused)) id[] =
       "@(#) $Id: gw_main.c,v 1.1.1.9 2007/05/31 17:22:04 sachin Exp $";
 
-static void
-usage(char* name)
-{
-    fprintf(stderr, "usage: %s -a relay anycast prefix -s subnet anycast "
-                    "prefix/plen [-d] [-n] [-v]\n",
-          name);
-    exit(1);
-}
-
 /*
  * Only allow one instance of the AMT gateway to run at a time.
  * Use the PID lockfile method to detect another instance.
  */
+// TBD: change the lockfile to permit multiple gateways talking to
+// different relays for different sources. --jake 2017-06-29
 static int
 init_pid_lockfile(gw_t* gw)
 {
@@ -123,6 +116,7 @@ gw_shutdown(int sig)
     fprintf(stderr, "Terminating amtgwd\n");
     snprintf(pidpath, MAXPATHLEN, "%s/%s.pid", GW_PID_FILE_PATH, "amtgwd");
     unlink(pidpath);
+    exit(0);
 }
 
 static void
@@ -139,121 +133,38 @@ init_signal_handler(gw_t* gw)
     }
 }
 
-static int
-gw_debug_server(gw_t* gw)
+static void
+gw_send_query_timer(int fd, short event, void* uap)
 {
-    char* pstr = NULL;
-    pstr = getenv("AMT_DEBUG_PORT");
-    if (pstr == NULL) {
-        gw->dbg_port = AMT_DEFAULT_DEBUG_PORT;
-    } else {
-        gw->dbg_port = strtoul(pstr, NULL, 10);
+    (void)fd;
+    (void)event;
+    int rc;
+    struct timeval tv;
+    gw_t* gw = (gw_t*)uap;
+
+    gw_send_local_membership_query(gw);
+
+    timerclear(&tv);
+    tv.tv_sec = 5;
+    rc = evtimer_add(gw->local_query_tev, &tv);
+    if (rc) {
+        fprintf(stderr, "%s: error rescheduling query timer: %s\n",
+                gw->name, strerror(errno));
     }
-    gw_init_dbg_sock(gw);
-    return 0;
 }
 
 int
 main(int argc, char** argv)
 {
-    int ch, rc, parent, nofork = FALSE;
+    int rc;
     gw_t gw;
 
     bzero(&gw, sizeof(gw_t));
-
-    while ((ch = getopt(argc, argv, "a:s:dnv")) != EOF) {
-        char* pstr = NULL;
-        in_addr_t prefix;
-
-        switch (ch) {
-            case 'a':
-                if (optarg == NULL) {
-                    fprintf(stderr, "no anycast address\n");
-                    exit(1);
-                }
-                rc = inet_pton(AF_INET, optarg, &prefix);
-                if (rc == 1) {
-                    gw.relay_anycast_address = ntohl(prefix);
-                } else {
-                    fprintf(stderr, "bad anycast address\n");
-                    exit(1);
-                }
-                break;
-
-            case 's':
-                pstr = strsep(&optarg, "/");
-                if (pstr == NULL) {
-                    fprintf(stderr, "bad anycast subnet prefix\n");
-                    exit(1);
-                }
-                if (optarg == NULL) {
-                    fprintf(stderr, "bad anycast subnet prefix length\n");
-                    exit(1);
-                }
-                rc = inet_pton(AF_INET, pstr, &prefix);
-                if (rc == 1) {
-                    gw.subnet_anycast_prefix = ntohl(prefix);
-                    gw.subnet_anycast_plen = strtol(optarg, NULL, 10);
-                    if (gw.subnet_anycast_plen == 0) {
-                        fprintf(stderr, "bad anycast prefix length\n");
-                        exit(1);
-                    }
-                    if (gw.subnet_anycast_plen > AMT_HOST_PLEN) {
-                        fprintf(stderr, "anycast prefix length too long\n");
-                        exit(1);
-                    }
-                } else {
-                    fprintf(stderr, "bad anycast prefix\n");
-                    exit(1);
-                }
-                break;
-            case 'd': {
-                gw.debug = TRUE;
-                break;
-            }
-            case 'n':
-                nofork = TRUE;
-                break;
-            case 'v':
-                fprintf(
-                      stderr, "AMT Gateway Version: %s\n", AMT_GW_VERSION);
-                exit(1);
-            case '?':
-            default:
-                usage(argv[0]);
-                break;
-        }
-    }
-
+    rc = gateway_parse_command_line(&gw, argc, argv);
     /*
      * save name
      */
     snprintf(gw.name, sizeof(gw.name), "%s", basename(argv[0]));
-
-    if (gw.relay_anycast_address == 0) {
-        fprintf(stderr,
-              "%s: relay anycast prefix/len must be set with -a\n",
-              gw.name);
-        exit(1);
-    }
-    if (gw.subnet_anycast_prefix == 0) {
-        fprintf(stderr,
-              "%s: subnet anycast prefix/len must be set with -s\n",
-              gw.name);
-        exit(1);
-    }
-
-    if (nofork == FALSE) {
-        parent = fork();
-        if (parent < 0) {
-            fprintf(stderr, "%s: Unable to fork background process.\n",
-                  gw.name);
-            exit(1);
-        }
-        if (parent) { /* parent */
-            exit(0);
-        }
-    }
 
     rc = init_pid_lockfile(&gw);
     if (rc < 0) {
@@ -274,20 +185,10 @@ main(int argc, char** argv)
         exit(1);
     }
 
-    gw.gw_context = event_init();
-    if (gw.gw_context == NULL) {
-        fprintf(stderr, "event_init failed\n");
-        exit(1);
-    }
+    gw.event_base = event_base_new();
 
-    /*
-     * Start the debug server
-     */
-    if (gw.debug == TRUE) {
-        TAILQ_INIT(&gw.dbg_head);
-        gw_debug_server(&gw);
-    }
 
+    fprintf(stderr, "%p == event_base\n", gw.event_base);
     if (init_iftun_device(&gw) < 0) {
         fprintf(stderr, "%s: Couldn't open tunnel device for writing.\n",
               gw.name);
@@ -296,43 +197,37 @@ main(int argc, char** argv)
 
     init_signal_handler(&gw);
 
-    /*
-     * Open the routing socket for manipulating routing table and interfaces
-     */
+
     rc = init_routing_socket(&gw);
     if (rc) {
         fprintf(stderr, "%s: Couldn't open routing socket\n", gw.name);
         exit(1);
     }
 
-    /*
-     * read interface configuration and clean up any existing anycast
-     * addresses on the tunnel interface.
-     * Determine a local source address to use.
-     * Determine the index of the tunnel interface
-     */
-    rc = init_address(&gw);
-    if (rc) {
+    TAILQ_INIT(&gw.request_head);
+
+    rc = init_sockets(&gw);
+    if (rc < 0) {
+        fprintf(stderr, "%s: can't initialize sockets: %s\n",
+              gw.name, strerror(errno));
         exit(1);
     }
 
-    /*
-     * Add anycast prefix address to tunnel interface
-     */
-    gw_if_addr_set(&gw);
-
-    TAILQ_INIT(&gw.request_head);
-
-/*
- * Make sure the default multicast interface points to the tunnel if
- */
-#if 0    
-    if (gw_mcast_default_set(&gw)) {
+    gw.local_query_tev = evtimer_new(gw.event_base,
+            gw_send_query_timer, &gw);
+    struct timeval tv;
+    timerclear(&tv);
+    tv.tv_sec = 0;
+    rc = evtimer_add(gw.local_query_tev, &tv);
+    if (rc < 0) {
+        fprintf(stderr, "%s: can't initialize query timer: %s\n",
+              gw.name, strerror(errno));
+        exit(1);
     }
-#endif
 
-    rc = event_dispatch();
-    fprintf(stderr, "%s: Unexpected exit: %s\n", gw.name, strerror(errno));
+    rc = event_base_dispatch(gw.event_base);
+    fprintf(stderr, "%s: Unexpected exit from event_base_dispatch: %s\n",
+            gw.name, strerror(errno));
 
     exit(rc);
 }
@@ -362,8 +257,9 @@ gw_discover_relay(gw_t* gw)
      * close relay socket
      */
     if (gw->udp_sock) {
-        rc = event_del(&gw->udp_event_id);
-        bzero(&gw->udp_event_id, sizeof(struct event));
+        rc = event_del(gw->udp_event_ev);
+        event_free(gw->udp_event_ev);
+        gw->udp_event_ev = 0;
         close(gw->udp_sock);
         gw->udp_sock = 0;
     }
@@ -373,26 +269,21 @@ gw_discover_relay(gw_t* gw)
      */
     TAILQ_FOREACH(rq, &gw->request_head, rq_next)
     {
-        if (evtimer_pending(&rq->rq_timer, NULL)) {
-            evtimer_del(&rq->rq_timer);
+        if (rq->rq_tev) {
+            if (evtimer_pending(rq->rq_tev, NULL)) {
+                evtimer_del(rq->rq_tev);
+            }
         }
     }
 
     /*
      * stop the discovery timer
      */
-    if (evtimer_pending(&gw->discovery_timer, NULL)) {
-        evtimer_del(&gw->discovery_timer);
+    if (gw->discovery_tev) {
+        if (evtimer_pending(gw->discovery_tev, NULL)) {
+            evtimer_del(gw->discovery_tev);
+        }
     }
-
-#if 0
-    /*
-     * stop the query timer
-     */
-    if (evtimer_pending(&gw->query_timer, NULL)) {
-	evtimer_del(&gw->query_timer);
-    }
-#endif
 
     /*
      * open discovery socket
@@ -406,8 +297,11 @@ gw_discover_relay(gw_t* gw)
 
     timerclear(&tv);
     tv.tv_sec = GW_DISCOVERY_OFFSET;
-    evtimer_set(&gw->discovery_timer, gw_send_discovery, gw);
-    rc = evtimer_add(&gw->discovery_timer, &tv);
+    if (!gw->discovery_tev) {
+        gw->discovery_tev = evtimer_new(gw->event_base, gw_send_discovery,
+                gw);
+    }
+    rc = evtimer_add(gw->discovery_tev, &tv);
     if (rc < 0) {
         fprintf(stderr, "%s: can't initialize discovery timer: %s\n",
               gw->name, strerror(errno));

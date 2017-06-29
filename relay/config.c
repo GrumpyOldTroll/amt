@@ -10,6 +10,7 @@
 typedef struct ConfigInput_s {
     char tunnel_addr[MAX_ADDR_STRLEN];
     char listen_addr[MAX_ADDR_STRLEN];
+    char relay_addr[MAX_ADDR_STRLEN];
     char interface_name[IFNAMSIZ];
     char* last_fname;
     relay_instance* instance;
@@ -44,6 +45,14 @@ handle_tunnel_addr(ConfigInput* input, const char* value)
 }
 
 static int
+handle_relay_addr(ConfigInput* input, const char* value)
+{
+    int rc = handle_string(input->relay_addr, sizeof(input->relay_addr),
+            value, "RelayAddr (-r/--relay-addr)");
+    return rc;
+}
+
+static int
 handle_listen_addr(ConfigInput* input, const char* value)
 {
     int rc = handle_string(input->listen_addr, sizeof(input->listen_addr),
@@ -60,7 +69,10 @@ handle_data_interface(ConfigInput* input, const char* value)
     if (!rc) {
         input->instance->cap_iface_index = if_nametoindex(value);
         if (input->instance->cap_iface_index == 0) {
-            perror("bad capture interface name");
+            char temp[256];
+            snprintf(temp, sizeof(temp), "failed if_nametoindex(%s)",
+                     value);
+            perror(temp);
             rc = -1;
         }
     }
@@ -234,6 +246,9 @@ parse_ip(char* in_str, struct sockaddr_storage* sock_addr,
             rc = inet_pton(AF_INET, in_str, &addrp->sin_addr);
             if (rc == 1) {
                 addrp->sin_family = AF_INET;
+#ifdef BSD
+                addrp->sin_len = sizeof(*addrp);
+#endif
             } else {
                 fprintf(stderr, "%s %s failed to parse as ipv4\n",
                         name, in_str);
@@ -247,6 +262,9 @@ parse_ip(char* in_str, struct sockaddr_storage* sock_addr,
             rc = inet_pton(AF_INET6, in_str, &addrp->sin6_addr);
             if (rc == 1) {
                 addrp->sin6_family = AF_INET6;
+#ifdef BSD
+                addrp->sin_len = sizeof(*addrp);
+#endif
             } else {
                 fprintf(stderr, "%s %s failed to parse as ipv6\n",
                         name, in_str);
@@ -254,6 +272,12 @@ parse_ip(char* in_str, struct sockaddr_storage* sock_addr,
             }
             break;
         }
+    }
+
+    {
+        char str[MAX_SOCK_STRLEN];
+        fprintf(stderr, "config %s: parsed %s from %s\n", name,
+                sock_ntop(family, sock_addr, str, sizeof(str)), in_str);
     }
     return 0;
 }
@@ -276,6 +300,13 @@ handle_config_finish(ConfigInput* input)
             strcpy(input->listen_addr, "2001:3::1");
         }
     }
+    if (!input->relay_addr[0]) {
+        if (instance->relay_af == AF_INET) {
+            strcpy(input->relay_addr, input->listen_addr);
+        } else if (instance->relay_af == AF_INET6) {
+            strcpy(input->relay_addr, input->listen_addr);
+        }
+    }
     if (!input->tunnel_addr[0]) {
         if (instance->tunnel_af == AF_INET) {
             strcpy(input->tunnel_addr, "0.0.0.0");
@@ -285,9 +316,10 @@ handle_config_finish(ConfigInput* input)
     }
     int rc = parse_ip(pstr, &instance->listen_addr, instance->relay_af,
             "DiscoveryAddr (-a/--anycast)");
-
     rc |= parse_ip(input->tunnel_addr, &instance->tunnel_addr,
             instance->tunnel_af, "TunnelAddr (-s,--tunnel-addr)");
+    rc |= parse_ip(input->relay_addr, &instance->relay_addr,
+            instance->relay_af, "RelayAddr (-r/--relay-addr)");
 
     if (instance->cap_iface_index == 0) {
         fprintf(stderr, "DataInterface (-c/--interface) wasn't set to a valid interface name\n");
@@ -307,6 +339,21 @@ handle_config_finish(ConfigInput* input)
             (struct sockaddr_in6*)&instance->listen_addr;
         paddr->sin6_port = htons(instance->amt_port);
     }
+    {
+        char str[MAX_ADDR_STRLEN];
+        fprintf(stderr, "listen_addr: %s from %s\n",
+                sock_ntop(instance->relay_af, &instance->listen_addr,
+                    str, sizeof(str)), pstr);
+    }
+
+
+    // TBD: allow non-raw sockets with ipv6 data (by adding fix in
+    // data_socket_read and data_socket_init, where it says TBD)
+    // --jake 2017-06-14
+    if (instance->tunnel_af == AF_INET6 && instance->nonraw_count) {
+        fprintf(stderr, "ipv6 data with nonraw socket is not currently supported\n");
+        return -1;
+    }
 
     return 0;
 }
@@ -325,10 +372,12 @@ config_param(ConfigInput* input,
         { "DebugLevel", handle_debug },
         { "DequeueLen", handle_dequeue_length },
         { "DiscoveryAddr", handle_listen_addr },
+        { "RelayAddr", handle_relay_addr },
         { "ExternalData", handle_external },
         { "RelayFamily", handle_relay_family },
         { "RelayUrlPort", handle_url_port },
         { "SuppressICMP", handle_icmp_suppress },
+        { "RelayAddr", handle_relay_addr },
         { "TunnelAddr", handle_tunnel_addr },
         { "TunnelFamily", handle_tunnel_family },
     };
@@ -347,7 +396,7 @@ config_param(ConfigInput* input,
 }
 
 static int
-relay_config_read(ConfigInput* input, const char* fname)
+config_read(ConfigInput* input, const char* fname)
 {
     int rc = 0;
 
@@ -402,14 +451,24 @@ relay_config_read(ConfigInput* input, const char* fname)
 static void
 usage(char* name)
 {
-    fprintf(stderr, "usage: %s -a anycast prefix[/plen] [-d] [-q count "
-                    "of packets to dequeue at once] [-t queuing delay "
-                    "threshold (default 100 msec)] [-b AMT port (default "
-                    "2268)] [-c data_interface] [-i] [-e] [-w port]*\n"
-                    "  default is to run raw sockets (requires sudo). If "
-                    "one or more ports are passed with -w, only those "
-                    "ports will be handled. With -i (no icmp response), "
-                    "it's possible to run non-root. -e will\n",
+    fprintf(stderr, "usage: %s -a <ip> -c <interface> [options]\n"
+            "  Options:\n"
+            "    -a/--discovery-addr <ip>: IP (matching -l) to listen for AMT discovery packets on\n"
+            "    -r/--relay-addr <ip>: IP (matching -l) to use for discovery response and for tunnel\n"
+            "    -s/--tunnel-addr <ip>: IP (matching -n) to use for source of queries inside the tunnel\n"
+            "    -c/--interface <ifname>: Interface to receive native multicast data\n"
+            "    -d/--debug: Turn on debugging messages\n"
+            "    -q/--queue-length <val>: Packets to handle at once (default 10)\n"
+            "    -b/--amt-port <val>: Port to use for AMT data (default 2268)\n"
+            "    -p/--port <val|\"none\">: port to listen for stats requests\n"
+            "    -n/--net-family <inet|inet6>: ip family for multicast data\n"
+            "    -l/--tun-family <inet|inet6>: ip family for AMT packets (discovery and \n"
+            "    -w/--non-raw <val>: (multiple ok) Accept data on this port. (By,\n"
+            "              defaultraw captures all. Adding this and \n"
+            "              icmp-suppress permits non-root, and captures only\n"
+            "              specified ports)\n"
+            "    -e/--external: data is arriving from an external interface\n"
+            "              (doesn't recompute checksums, since nic did it\n",
           name);
     exit(1);
 }
@@ -424,11 +483,13 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
 
     struct option long_options[] = {
         { "anycast", required_argument, 0, 'a' },
+        { "discovery-addr", required_argument, 0, 'a' },
         { "amt-port", required_argument, 0, 'b' },
         { "debug", no_argument, 0, 'd' },
         { "icmp-suppress", no_argument, 0, 'i' },
         { "queue-length", required_argument, 0, 'q' },
         { "queue-thresh", required_argument, 0, 't' },
+        { "help", no_argument, 0, 'h' },
         { "interface", required_argument, 0, 'c' },
         { "port", required_argument, 0, 'p' },
         { "file", required_argument, 0, 'f' },
@@ -436,15 +497,20 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
         { "tun-relay", required_argument, 0, 'l' },
         { "non-raw", required_argument, 0, 'w' },
         { "external", required_argument, 0, 'e' },
+        { "relay-addr", required_argument, 0, 'r' },
         { "tunnel-addr", required_argument, 0, 's' }
     };
 
     // TBD: config file instead of command line args.
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:s:eiw:f:",
+    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:r:s:eiw:f:h",
                   long_options, NULL)) != EOF) {
         switch (ch) {
             case 's': {
                 rc = handle_tunnel_addr(&input, optarg);
+                break;
+            }
+            case 'r': {
+                rc = handle_relay_addr(&input, optarg);
                 break;
             }
             case 'l': {
@@ -493,7 +559,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
                     fprintf(stderr, "must specify config file with -f\n");
                     exit(1);
                 }
-                if (relay_config_read(&input, optarg) != 0) {
+                if (config_read(&input, optarg) != 0) {
                     fprintf(stderr, "failure parsing config file %s",
                           optarg);
                     exit(1);
@@ -510,7 +576,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
                 break;
             default:
                 fprintf(stderr, "unknown argument '%c'\n", ch);
-            case '?':
+            case 'h':
                 usage(argv[0]);
         }
         if (rc) {

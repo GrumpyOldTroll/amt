@@ -38,6 +38,14 @@
 #ifndef AMT_GATEWAY_GW_H
 #define AMT_GATEWAY_GW_H
 
+#include <paths.h>
+#include <event.h>
+#include <sys/param.h>
+#include <sys/queue.h>
+#include "utils.h"
+#include "prefix.h"
+#include "amt.h"
+
 #define GW_PID_FILE_PATH "/tmp"
 #define GW_DISCOVERY_OFFSET 1    /* seconds */
 #define GW_DISCOVERY_INTERVAL 20 /* seconds */
@@ -59,36 +67,28 @@ typedef enum {
 TAILQ_HEAD(requests, _request_t);
 TAILQ_HEAD(dbg_clients, _debug_client_t);
 
+struct route_filter_s;
+
 typedef struct _gw_t
 {
     pid_t pid;                             /* current process id */
-    void* gw_context;                      /* event context */
+    // void* gw_context;                      /* event context */
     int disco_sock;                        /* discovery socket */
     int udp_sock;                          /* udp send/recv socket */
     int rt_sock;                           /* routing socket */
     int seq;                               /* routing socket seq # */
     int tundev;                            /* descriptor to tunnel */
-    int tununit;                           /* unit # of device */
-    int tunindex;                          /* index of device */
-    char tunifname[FILENAME_MAX];          /* TUN interface name */
-    struct event udp_disco_id;             /* discovery read event */
-    struct event udp_event_id;             /* udp read event */
-    struct event tun_event_id;             /* tun read event */
-    struct event discovery_timer;          /* send relay discoverys */
     u_int32_t anycast_relay_nonce;         /* relay discovery nonce */
-    in_addr_t subnet_anycast_prefix;       /* ipv4 anycast subnet (host)*/
-    int subnet_anycast_plen;               /* ipv4 subnet prefix length*/
-    in_addr_t relay_anycast_address;       /* ipv4 anycast subnet (relay)*/
-    struct sockaddr_in anycast_relay_addr; /* discovery address */
-    struct sockaddr_in unicast_relay_addr; /* relay to send to */
-    struct sockaddr_in local_addr;         /* local unicast address */
-    struct sockaddr_in tun_addr;           /* local tunnel address */
+    struct sockaddr_storage unicast_relay_addr; /* relay to send to */
+    struct sockaddr_storage local_addr;         /* local unicast address */
+    struct sockaddr_storage tun_addr;           /* local tunnel address */
+                                                /* (src igmp/mld queries) */
     struct requests request_head;          /* list head for request list */
     char name[NAME_MAX];                   /* program name */
     u_int8_t packet_buffer[BUFFER_SIZE];   /* transmit/recv buffer */
 
     relay_status relay;                 /* Relay discovery status */
-    struct event query_timer;           /* send periodic amt requests */
+    struct event *query_tev;           /* send periodic amt requests */
     u_int32_t query_len;                /* igmp/mld query len */
     u_int8_t query_buffer[BUFFER_SIZE]; /* igmp/mld query buffer */
 
@@ -96,26 +96,48 @@ typedef struct _gw_t
     u_int8_t debug;               /* debug flag */
     u_int16_t dbg_port;           /* debug port */
     int dbg_sock;                 /* debug socket */
-    struct event dbg_event_id;    /* debug read event */
-    struct dbg_clients dbg_head;  /* list head 4 dbg clients */
+    //struct event dbg_event_id;    /* debug read event */
+    //struct dbg_clients dbg_head;  /* list head 4 dbg clients */
     u_int32_t amt_req_sent;       /* # of AMT requests sent */
     u_int32_t data_pkt_rcvd;      /* # of MCast Data recvd */
     u_int32_t data_pkt_sent;      /* # of MCast Data sent */
     struct timeval last_req_time; /* Timestamp of last AMT req */
 
+    struct sockaddr_storage discovery_addr;
+    struct sockaddr_storage tunnel_addr;  /* bind to this addr */
+    int query_addr_set;
+    int tunnel_addr_set;
+    char **accept_strings;
+    struct route_filter_s *accept_routes;
+    unsigned int accept_count;
+    uint16_t amt_port;
+    int data_family;
+    int gateway_family;
+    char cap_iface_name[16]; // IFNAMSIZ might be better here.
+    int cap_iface_index;
+    uint8_t iface_hwaddr[6];
+    // int membership_sock;
+    // int forwarding_sock;
+    struct event_base *event_base;
+    struct event *membership_ev;
+    struct event *discovery_tev;          /* send relay discoverys */
+    struct event *udp_disco_ev;             /* discovery read event */
+    struct event *udp_event_ev;             /* udp read event */
+    struct event *local_query_tev;          /* send local query on timer */
 } gw_t;
 
 typedef struct _request_t
 {
     TAILQ_ENTRY(_request_t) rq_next; /* list of request structs */
     u_int32_t rq_nonce;              /* gateway nonce sent */
-    struct event rq_timer;           /* request timer */
+    struct event *rq_tev;           /* request timer */
     gw_t* rq_gw;                     /* gateway back pointer */
     int rq_count;                    /* number of attempts that failed */
     int rq_buffer_len;               /* size of original packet */
     u_int8_t rq_buffer[0];           /* original packet to send */
 } request_t;
 
+#if 0
 typedef struct _debug_client_t
 {
     TAILQ_ENTRY(_debug_client_t)
@@ -125,6 +147,13 @@ typedef struct _debug_client_t
     gw_t* dc_gw;                    /* Gateway instance */
     struct event client_event_id;   /* read event for the dbg client */
 } debug_client_t;
+#endif
+
+typedef struct route_filter_s
+{
+    prefix_t* source;
+    prefix_t* group;
+} route_filter_t;
 
 int init_sockets(gw_t*);
 int init_iftun_device(gw_t*);
@@ -133,8 +162,10 @@ int gw_mcast_default_set(gw_t*);
 int gw_if_addr_set(gw_t*);
 int gw_init_udp_sock(gw_t*);
 int init_routing_socket(gw_t*);
+int init_group_membership_socket(gw_t*);
+int init_forwarding_socket(gw_t*);
 void gw_cleanup_udp_sock(gw_t*);
-int socket_set_non_blocking(int);
+// int socket_set_non_blocking(int);
 void gw_send_discovery(int, short, void*);
 void gw_event_udp(int, short, void*);
 void gw_event_tun(int, short, void*);
@@ -142,5 +173,9 @@ void gw_request_start(gw_t*, u_int8_t*, int);
 void gw_forward_tun(gw_t*, u_int8_t*, int);
 void gw_age_relay(gw_t*);
 int gw_init_dbg_sock(gw_t*);
+int gateway_parse_command_line(gw_t* instance, int argc, char** argv);
+int socket_set_non_blocking(int s);
+int gw_send_local_membership_query(gw_t* gw);
 
 #endif  // AMT_GATEWAY_GW_H
+

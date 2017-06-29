@@ -75,18 +75,23 @@ prefix_build(int family, void* addr, int bitlen)
 {
     int nbytes;
     prefix_t* prefix;
-
-    if (family != AF_INET && family != AF_INET6) {
-        return NULL;
-    }
+    void* loc;
 
     nbytes = bitlen / NBBY;
     if (bitlen % NBBY) {
         nbytes++;
     }
     prefix = prefix_alloc(family);
+    if (family == AF_INET) {
+        loc = &prefix->addr.sin;
+    } else if (family == AF_INET6) {
+        loc = &prefix->addr.sin6;
+    } else {
+        return NULL;
+    }
+
     prefix->bitlen = bitlen;
-    bcopy(addr, &prefix->addr.sin, nbytes);
+    bcopy(addr, loc, nbytes);
 
     return prefix;
 }

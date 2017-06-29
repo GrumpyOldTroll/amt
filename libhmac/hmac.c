@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <md5.h>
 #include <string.h>
+#include <strings.h>
 
 /*
  * Function: hmac_md5
