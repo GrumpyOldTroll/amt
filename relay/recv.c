@@ -533,15 +533,20 @@ mld_decode(relay_instance* instance,
     pktlen -= sizeof(*ip);
     hdr_type = ip->ip6_nxt;
     cp += sizeof(*ip);
-    while (hdr_type != IPPROTO_ICMPV6 && hdr_type != IPPROTO_NONE) {
+    while (hdr_type != IPPROTO_ICMPV6 && hdr_type != IPPROTO_NONE && iphlen <= pktlen) {
         ext_hdr = (struct ip6_ext*)cp;
         hdr_type = ext_hdr->ip6e_nxt;
         iphlen += ((ext_hdr->ip6e_len + 1) << 3);
         cp += ((ext_hdr->ip6e_len + 1) << 3);
     }
 
-    if (hdr_type == IPPROTO_NONE)
+    if (iphlen > pktlen) {
         return MEMBERSHIP_ERROR;
+    }
+
+    if (hdr_type == IPPROTO_NONE) {
+        return MEMBERSHIP_ERROR;
+    }
 
     if (ntohs(ip->ip6_plen) != pktlen) {
         instance->stats.mld_len_bad++;
