@@ -1138,9 +1138,14 @@ relay_packet_deq(int fd, short event, void* uap)
                         /*
                          * If we are going to tell the gateway to use an
                          * address, make sure we have a socket open that is
-                         * listening to the AMT port on that address.
+                         * listening to the AMT port on that address. But
+                         * in nat mode, just use the same discover socket
+                         * (even though discover might respond with a
+                         * different relay address)
                          */
-                        relay_create_recv_socket(instance, src);
+                        if (!BIT_TEST(instance->relay_flags, RELAY_FLAG_NAT_MODE)) {
+                            relay_create_recv_socket(instance, src);
+                        }
 
                         relay_send_advertisement(pkt, nonce, src);
                         prefix_free(src);
@@ -2021,10 +2026,10 @@ nonraw_data_read(int fd, short flags, void* uap)
             cp = relay_packet_insert_before(pkt, "udp header",
                     sizeof(struct udphdr));
             struct udphdr* udph = (struct udphdr*)cp;
-            udph->uh_sport = pkt->pkt_sport;
-            udph->uh_dport = pkt->pkt_dport;
-            udph->uh_ulen = htons(pkt->pkt_len); // note: changes in insert
-            udph->uh_sum = 0;
+            UH_SPORT(udph) = pkt->pkt_sport;
+            UH_DPORT(udph) = pkt->pkt_dport;
+            UH_ULEN(udph) = htons(pkt->pkt_len); // note: changes in insert
+            UH_SUM(udph) = 0;
             uint8_t ttl = 50, tos = 0;
             unsigned int opt_size = 0;
             unsigned int opt_len = 0;
@@ -2187,10 +2192,10 @@ nonraw_data_read(int fd, short flags, void* uap)
             cp = relay_packet_insert_before(pkt, "udp header",
                     sizeof(struct udphdr));
             struct udphdr* udph = (struct udphdr*)cp;
-            udph->uh_sport = pkt->pkt_sport;
-            udph->uh_dport = pkt->pkt_dport;
-            udph->uh_ulen = htons(pkt->pkt_len); // note: changes in insert
-            udph->uh_sum = 0;
+            UH_SPORT(udph) = pkt->pkt_sport;
+            UH_DPORT(udph) = pkt->pkt_dport;
+            UH_ULEN(udph) = htons(pkt->pkt_len); // note: changes in insert
+            UH_SUM(udph) = 0;
             uint8_t ttl = 50;
             uint8_t tos = 0;
             /*
@@ -2264,7 +2269,7 @@ nonraw_data_read(int fd, short flags, void* uap)
                 uint32_t uh_len;
                 uint8_t pshdr_v[4];
             } pshd;
-            pshd.uh_len = ntohl(ntohs(udph->uh_ulen));
+            pshd.uh_len = ntohl(ntohs(UH_ULEN(udph)));
             pshd.pshdr_v[0] = 0;
             pshd.pshdr_v[1] = 0;
             pshd.pshdr_v[2] = 0;
@@ -2276,9 +2281,9 @@ nonraw_data_read(int fd, short flags, void* uap)
             iov[1].iov_base = &pshd;
             iov[1].iov_len = 8;
             iov[2].iov_base = udph;
-            iov[2].iov_len = ntohs(udph->uh_ulen);
-            udph->uh_sum = 0;
-            udph->uh_sum = iov_csum(iov, niovs);
+            iov[2].iov_len = ntohs(UH_ULEN(udph));
+            UH_SUM(udph) = 0;
+            UH_SUM(udph) = iov_csum(iov, niovs);
 
             /*
             if (relay_debug(pkt->pkt_instance)) {
@@ -2752,16 +2757,16 @@ raw_socket_read(int fd, short flags, void* uap)
                         continue;
                     }
                     struct udphdr* uph = (struct udphdr*)cp;
-                    if (len < ntohs(uph->uh_ulen)) {
+                    if (len < ntohs(UH_ULEN(uph))) {
                         fprintf(stderr, "dropping packet with payload too "
                             "small for udp len (%u < %u)\n", len,
-                            ntohs(uph->uh_ulen));
+                            ntohs(UH_ULEN(uph)));
                         relay_pkt_free(pkt);
                         continue;
                     }
-                    uph->uh_sum = 0;
-                    pkt->pkt_sport = uph->uh_sport;
-                    pkt->pkt_dport = uph->uh_dport;
+                    UH_SUM(uph) = 0;
+                    pkt->pkt_sport = UH_SPORT(uph);
+                    pkt->pkt_dport = UH_SPORT(uph);
                 }
             }
         }
@@ -2815,10 +2820,10 @@ raw_socket_read(int fd, short flags, void* uap)
                         continue;
                     }
                     struct udphdr* uph = (struct udphdr*)cp;
-                    if (len < ntohs(uph->uh_ulen)) {
+                    if (len < ntohs(UH_ULEN(uph))) {
                         fprintf(stderr, "dropping packet with payload too "
                             "small for udp len (%u < %u)\n", len,
-                            ntohs(uph->uh_ulen));
+                            ntohs(UH_ULEN(uph)));
                         relay_pkt_free(pkt);
                         continue;
                     }
@@ -2829,7 +2834,7 @@ raw_socket_read(int fd, short flags, void* uap)
                         uint32_t uh_len;
                         uint8_t pshdr_v[4];
                     } pshd;
-                    pshd.uh_len = ntohl(ntohs(uph->uh_ulen));
+                    pshd.uh_len = ntohl(ntohs(UH_ULEN(uph)));
                     pshd.pshdr_v[0] = 0;
                     pshd.pshdr_v[1] = 0;
                     pshd.pshdr_v[2] = 0;
@@ -2841,12 +2846,12 @@ raw_socket_read(int fd, short flags, void* uap)
                     iov[1].iov_base = &pshd;
                     iov[1].iov_len = 8;
                     iov[2].iov_base = uph;
-                    iov[2].iov_len = ntohs(uph->uh_ulen);
-                    uph->uh_sum = 0;
-                    uph->uh_sum = iov_csum(iov, niovs);
+                    iov[2].iov_len = ntohs(UH_ULEN(uph));
+                    UH_SUM(uph) = 0;
+                    UH_SUM(uph) = iov_csum(iov, niovs);
 
-                    pkt->pkt_sport = uph->uh_sport;
-                    pkt->pkt_dport = uph->uh_dport;
+                    pkt->pkt_sport = UH_SPORT(uph);
+                    pkt->pkt_dport = UH_DPORT(uph);
                 }
             }
         }

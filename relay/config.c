@@ -150,6 +150,13 @@ handle_bit(int* flags, int flag_val, const char* value, const char* name)
 }
 
 static int
+handle_nat_mode(ConfigInput* input, const char* value)
+{
+    return handle_bit(&input->instance->relay_flags, RELAY_FLAG_NAT_MODE,
+            value, "NatMode (-m/--nat-mode)");
+}
+
+static int
 handle_debug(ConfigInput* input, const char* value)
 {
     return handle_bit(&input->instance->relay_flags, RELAY_FLAG_DEBUG,
@@ -372,12 +379,12 @@ config_param(ConfigInput* input,
         { "DebugLevel", handle_debug },
         { "DequeueLen", handle_dequeue_length },
         { "DiscoveryAddr", handle_listen_addr },
+        { "NatMode", handle_nat_mode },
         { "RelayAddr", handle_relay_addr },
         { "ExternalData", handle_external },
         { "RelayFamily", handle_relay_family },
         { "RelayUrlPort", handle_url_port },
         { "SuppressICMP", handle_icmp_suppress },
-        { "RelayAddr", handle_relay_addr },
         { "TunnelAddr", handle_tunnel_addr },
         { "TunnelFamily", handle_tunnel_family },
     };
@@ -486,6 +493,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
         { "discovery-addr", required_argument, 0, 'a' },
         { "amt-port", required_argument, 0, 'b' },
         { "debug", no_argument, 0, 'd' },
+        { "nat-mode", no_argument, 0, 'm' },
         { "icmp-suppress", no_argument, 0, 'i' },
         { "queue-length", required_argument, 0, 'q' },
         { "queue-thresh", required_argument, 0, 't' },
@@ -502,7 +510,7 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
     };
 
     // TBD: config file instead of command line args.
-    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:n:c:l:r:s:eiw:f:h",
+    while ((ch = getopt_long(argc, argv, "u:a:dp:q:t:g:b:mn:c:l:r:s:eiw:f:h",
                   long_options, NULL)) != EOF) {
         switch (ch) {
             case 's': {
@@ -526,6 +534,10 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
             }
             case 'a': {
                 rc = handle_listen_addr(&input, optarg);
+                break;
+            }
+            case 'm': {
+                rc = handle_nat_mode(&input, optarg);
                 break;
             }
             case 'd': {

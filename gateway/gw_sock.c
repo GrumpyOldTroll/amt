@@ -104,7 +104,6 @@ init_shared_gateway_sock(gw_t* gw, int* sock)
                 gw->name, strerror(errno));
         return errno;
     }
-    *sock = dsock;
 
     rc = socket_set_non_blocking(dsock);
     if (rc < 0) {
@@ -181,8 +180,10 @@ init_shared_gateway_sock(gw_t* gw, int* sock)
         fprintf(stderr, "%s: error binding tunnel to %s(%d): %s\n",
                 gw->name, inet_ntop(gw->gateway_family, in_addr, str,
                     sizeof(str)), port, strerror(errno));
+        close(dsock);
         return errno;
     }
+    *sock = dsock;
 
     return 0;
 }

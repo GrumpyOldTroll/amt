@@ -20,5 +20,17 @@ int build_membership_query(int family, struct sockaddr* source,
 // sa shold be sockaddr_in or sockaddr_in6, with family AF_INET or AF_INET6
 const char* sock_ntop(int family, void* sa, char* str, int len);
 
+#if defined(_GNU_SOURCE) && !defined(__FAVOR_BSD)
+#define UH_SPORT(ptr) ((ptr)->source)
+#define UH_DPORT(ptr) ((ptr)->dest)
+#define UH_SUM(ptr) ((ptr)->check)
+#define UH_ULEN(ptr) ((ptr)->len)
+#else
+#define UH_SPORT(ptr) ((ptr)->uh_sport)
+#define UH_DPORT(ptr) ((ptr)->uh_dport)
+#define UH_SUM(ptr) ((ptr)->uh_sum)
+#define UH_ULEN(ptr) ((ptr)->uh_ulen)
+#endif
+
 #endif  // AMT_INCLUDE_UTILS_H_
 

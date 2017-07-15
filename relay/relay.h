@@ -97,6 +97,7 @@ typedef struct _relay_stats
 #define RELAY_FLAG_NONRAW 0x2
 #define RELAY_FLAG_EXTERNAL 0x4
 #define RELAY_FLAG_NOICMP 0x8
+#define RELAY_FLAG_NAT_MODE 0x10
 
 #define DEFAULT_URL_PORT 8080
 
