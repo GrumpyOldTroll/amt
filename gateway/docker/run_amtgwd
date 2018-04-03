@@ -1,0 +1,104 @@
+#!/bin/bash
+
+# A POSIX variable
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+# Initialize our own variables:
+data=4
+tunnel=4
+verbose=0
+
+show_help() {
+    echo "$0 [-d 4|6] [-t 4|6] <discovery_ip>"
+    echo " -d ==> use IPv4 or IPv6 for the data (default 4)"
+    echo " -t ==> use IPv4 or IPv6 for the tunnel (default 4)"
+}
+
+while getopts "h?vd:t:" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    v)  verbose=1
+        ;;
+    d)  data=$OPTARG
+        ;;
+    t)  tunnel=$OPTARG
+        ;;
+    esac
+done
+
+shift $((OPTIND-1))
+[ "$1" = "--" ] && shift
+
+if [ -z "$1" ]; then
+    show_help
+    exit 1
+fi
+
+if [ "$data" != "4" -a "$data" != "6" ]; then
+    show_help
+    exit 1
+fi
+
+if [ "$tunnel" != "4" -a "$tunnel" != "6" ]; then
+    show_help
+    exit 1
+fi
+
+discovery_ip=$1
+
+if [ "$tunnel" = "4" ]; then
+    larg=inet
+else
+    larg=inet6
+fi
+
+amt_d=""
+mc_d=""
+if [ "$verbose" != "0" ]; then
+    amt_d="-d"
+    mc_d="-d"
+fi
+
+
+ip tuntap add mode tun dev tun0
+
+if [ "$data" = "4" ]; then
+    narg=inet
+    ip addr add dev tun0 10.8.8.1/24 brd +
+    sarg=10.8.8.2
+    mc_f="/etc/mcproxy_v4.conf"
+else
+    narg=inet6
+    ip -6 addr add dev tun0 fe80::9000:1/64
+    sarg=fe80::9000:2
+    mc_f="/etc/mcproxy_v6.conf"
+fi
+
+ip link set up dev tun0
+
+cd /var/log
+/bin/amtgwd -a $discovery_ip -s $sarg -n $narg -l $larg -c tun0 $amt_d &
+AMTGWD_PID=$!
+
+mkdir -p /var/log/mcproxy
+cd /var/log/mcproxy
+/bin/mcproxy -r -f $mc_f $mc_d &
+MCPROXY_PID=$!
+
+while true; do
+    if ! ps --pid $AMTGWD_PID > /dev/null; then
+        echo "amtgwd not running"
+        kill $MCPROXY_PID
+        exit 1
+    fi
+    if ! ps --pid $MCPROXY_PID > /dev/null; then
+        echo "mcproxy not running"
+        kill $AMTGWD_PID
+        exit 1
+    fi
+    sleep 10
+done
+
