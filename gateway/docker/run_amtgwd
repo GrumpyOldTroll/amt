@@ -77,6 +77,12 @@ else
     mc_f="/etc/mcproxy_v6.conf"
 fi
 
+# use eth1 instead of eth0 for mcproxy if a 2nd interface has been added
+# c.f. #3 of https://github.com/GrumpyOldTroll/amt/blob/master/gateway/docker/README.txt
+if ip link show dev eth1 > /dev/null; then
+    sed -i $mc_f -e "s/eth0/eth1/";
+fi
+
 ip link set up dev tun0
 
 cd /var/log
