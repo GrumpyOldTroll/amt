@@ -257,7 +257,7 @@ top_srcdir = @top_srcdir@
 @WANT_MD5_TRUE@MD5_LIBS = $(top_builddir)/libmd5/libmd5.a
 amtrelayd_SOURCES = main.c config.c recv.c tree.c tree.h relay.h
 amtrelayd_LDADD = $(top_builddir)/libhmac/libhmac.a $(top_builddir)/libpatricia/libpatricia.a $(top_builddir)/libprefix/libprefix.a $(top_builddir)/libshared/libshared.a $(top_builddir)/libmem/libmem.a $(MD5_LIBS)
-AM_CPPFLAGS = -D_GNU_SOURCE -D_BSD_SOURCE -Werror -Wall -I$(top_builddir)/include -I$(top_builddir)/libmem -I$(top_builddir)/libhmac -I$(top_builddir)/libpatricia -I$(top_builddir)/libprefix -I$(top_builddir)/libshared $(MD5_INCLUDES)
+AM_CPPFLAGS = -D_GNU_SOURCE -D_DEFAULT_SOURCE -Werror -Wall -I$(top_builddir)/include -I$(top_builddir)/libmem -I$(top_builddir)/libhmac -I$(top_builddir)/libpatricia -I$(top_builddir)/libprefix -I$(top_builddir)/libshared $(MD5_INCLUDES)
 all: all-am
 
 .SUFFIXES:
