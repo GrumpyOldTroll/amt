@@ -603,10 +603,14 @@ relay_parse_command_line(relay_instance* instance, int argc, char** argv)
         if (input.last_fname) {
             fprintf(stderr, "Error finalizing from config file %s.\n",
                     input.last_fname);
+            free(input.last_fname);
         } else {
             fprintf(stderr, "Error finalizing config from command line.\n");
         }
         exit(1);
+    }
+    if (input.last_fname) {
+        free(input.last_fname);
     }
     return 0;
 }

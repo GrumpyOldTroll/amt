@@ -1997,6 +1997,7 @@ nonraw_data_read(int fd, short flags, void* uap)
 
         if (rc <= 0) {
             if (errno == EWOULDBLOCK) {
+                relay_pkt_free(pkt);
                 break;
             }
             fprintf(stderr, "error receiving nonraw data packet: %s\n",
@@ -2647,6 +2648,7 @@ raw_socket_read(int fd, short flags, void* uap)
 
         if (rc <= 0) {
             if (errno == EWOULDBLOCK) {
+                relay_pkt_free(pkt);
                 break;
             }
             fprintf(stderr, "error receiving raw data packet: %s\n",
@@ -2922,6 +2924,7 @@ relay_raw_socket_init(relay_instance* instance)
        packet socket to an interface.  Fields used for binding are
        sll_family (should be AF_PACKET), sll_protocol, and sll_ifindex."
     */
+    // fprintf(stderr, "binding iface=%d\n", instance->cap_iface_index);
     struct sockaddr_ll bind_addr;
     bzero(&bind_addr, sizeof(bind_addr));
     bind_addr.sll_family = AF_PACKET;
