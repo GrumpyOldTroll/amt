@@ -3,6 +3,13 @@
 # one machine and no network activity. This is a fine way to run under
 # gdb, if you can reproduce your problem.
 
+# ** setup commands **
+
+# reset:
+sudo ip netns delete msnd
+sudo ip netns delete mrelay
+sudo ip netns delete mrcv
+
 # setup chain:
 sudo ip netns add msnd
 sudo ip netns add mrelay
@@ -31,27 +38,44 @@ sudo ip netns exec mrcv     ip route add default dev veth3
 sudo ip netns exec mrelay ip link add dev lo1 type dummy
 sudo ip netns exec mrelay ip addr add 127.0.0.1 dev lo1
 
+# creating the tunnel port for the gateway
+sudo ip tuntap add mode tun dev tun0
+sudo ip link set dev tun0 netns mrcv
+sudo ip netns exec mrcv ip addr add dev tun0 10.5.5.1/24 brd +
+sudo ip netns exec mrcv     ip link set dev tun0 up
+
+# disabling RPF on tun0 with the following two commands:
+sudo ip netns exec mrcv sysctl -w "net.ipv4.conf.tun0.rp_filter=0"
+sudo ip netns exec mrcv sysctl -w "net.ipv4.conf.all.rp_filter=0"
+# alternatively, you could use this to prevent RPF from dropping incoming traffic, although this is source specific
+# sudo ip netns exec mrcv     ip route add 10.2.2.1 dev tun0
+
+# ** end of setup commands **
+
 # run as needed:
-# sudo ip netns exec msnd unbuffer iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 30 &
+sudo ip netns exec msnd unbuffer iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 30 &
+# or just keep this running:
+# sudo ip netns exec msnd unbuffer bash -x -c 'while true; do iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900; sleep 1; done' &
 
-sudo ip netns exec msnd unbuffer bash -x -c 'while true; do iperf-ssm/src/iperf --client 232.10.10.10 --udp --ttl 30 --bandwidth 1K --bind 10.2.2.1 --len 125 --time 900; sleep 1; done' &
+sudo ip netns exec mrelay unbuffer amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q 1 -d -a "10.3.3.1/32" &
 
+# had to remove 'unbuffer' command here since the program would need to be killed afterward otherwise
+sudo ip netns exec mrcv amtgwd -a 10.3.3.1 -n inet -l inet -s 10.5.5.2 -c tun0 -d &
 
-sudo ip netns exec mrelay unbuffer amt/relay/amtrelayd -n inet -l inet -c veth1 -s 10.3.3.1 -q1 -d -a "10.3.3.1/32" &
+# couldn't get iperf sending join messages on the tunnel with the iperf-ssm repo without creating extra routes,
+# so using iperf 2.0.13 instead with %tun0 on the bind option
+sudo ip netns exec mrcv unbuffer iperf --server --udp --single_udp --bind 232.10.10.10%tun0 --ssm-host 10.2.2.1 --interval 1 --len 125 &
 
+# should get a stream of data received by the last command
+# I recommend ommitting the & at the end of each statement and just running each command in a separate terminal to see the output
 
-sudo ip netns exec mrcv unbuffer amt/gateway/amtgwd -a 10.3.3.1 -s 10.4.4.0/24 -d -n &
-
-sudo ip netns exec mrcv unbuffer iperf-ssm/src/iperf --server --udp --single_udp --bind 232.10.10.10 --source 10.2.2.1 --interface tun0 --interval 1 --len 125 &
 
 # Useful places to capture:
-# sudo ip netns exec msnd unbuffer tcpdump -i veth0 -n
-# sudo ip netns exec mrelay unbuffer tcpdump -i veth1 -n
-# sudo ip netns exec mrelay unbuffer tcpdump -i veth2 -n
-# sudo ip netns exec mrcv unbuffer tcpdump -i veth3 -n
-# sudo ip netns exec mrcv unbuffer tcpdump -i tun0 -n
-
-
+sudo ip netns exec msnd unbuffer tcpdump -i veth0 -n
+sudo ip netns exec mrelay unbuffer tcpdump -i veth1 -n
+sudo ip netns exec mrelay unbuffer tcpdump -i veth2 -n
+sudo ip netns exec mrcv unbuffer tcpdump -i veth3 -n
+sudo ip netns exec mrcv unbuffer tcpdump -i tun0 -n
 
 # debugging
 # this doesn't work well:
