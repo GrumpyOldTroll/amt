@@ -106,6 +106,9 @@ libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
 
 3. v6 data inside v6 tunnel:
 
+(breadcrumbs for the v6 nat:
+https://medium.com/@skleeschulte/how-to-enable-ipv6-for-docker-containers-on-ubuntu-18-04-c68394a219a2)
+
 ~~~
 # set up v6 nat for the ULA:
 DKRNET=$(grep fixed-cidr-v6 /etc/docker/daemon.json | awk '{print $2;}' | sed -e 's/"\([^"]*\)"/\1/')
