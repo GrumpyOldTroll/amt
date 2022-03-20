@@ -71,6 +71,10 @@ if [ "$data" = "4" ]; then
     sarg=10.8.8.2
     mc_f="/etc/mcproxy_v4.conf"
 else
+    # docker weirdly added a force-disable ipv6 by default:
+    # https://docs.docker.com/config/daemon/ipv6/
+    # https://www.synoforum.com/threads/seeking-remedy-for-rtnetlink-answers-permission-denied.2470/
+    sysctl net.ipv6.conf.all.disable_ipv6=0
     narg=inet6
     ip -6 addr add dev tun0 fe80::9000:1/64
     sarg=fe80::9000:2

@@ -294,6 +294,15 @@ gw_send_discovery(int fd, short event, void* uap)
         return;
     }
 
+    if (!gw->discovery_tev) {
+        gw->discovery_tev = evtimer_new(gw->event_base,
+                gw_send_discovery, gw);
+    } else {
+        if (evtimer_pending(gw->discovery_tev, NULL)) {
+            evtimer_del(gw->discovery_tev);
+        }
+    }
+
     timerclear(&tv);
     tv.tv_sec = GW_DISCOVERY_INTERVAL;
     rc = evtimer_add(gw->discovery_tev, &tv);
@@ -369,7 +378,7 @@ gw_recv_advertisement(gw_t* gw, u_int8_t* cp, int len)
     /*
      * If the discovery timer isn't running, then ignore the advertisement
      */
-    if (!evtimer_pending(gw->discovery_tev, NULL)) {
+    if (!gw->discovery_tev || !evtimer_pending(gw->discovery_tev, NULL)) {
         fprintf(stderr,
               "%s: received advertisement but no discovery active.\n",
               gw->name);
@@ -823,7 +832,7 @@ gw_request_start(gw_t* gw, u_int8_t* cp, int len)
         gw->discovery_tev = evtimer_new(gw->event_base,
                 gw_send_discovery, gw);
     }
-    if ((rc = evtimer_pending(gw->discovery_tev, NULL)) ||
+    if (evtimer_pending(gw->discovery_tev, NULL) ||
           gw->relay == RELAY_DISCOVERY_INPROGRESS) {
         return;
     }

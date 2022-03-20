@@ -45,3 +45,91 @@ Currently open issues:
 6. XMLRPC interface for management
 7. get mtu and allocate packet buffer based on mtu size
 8. check for memory leaks (I know there is at least one).
+
+To build:
+
+~~~
+apt-get install \
+  autoconf \
+  libtool-bin \
+  make \
+  cmake \
+  build-essential
+./configure
+make
+~~~
+
+To build the docker container:
+
+~~~
+docker build -t amtgw:latest -f gateway/docker/Dockerfile .
+~~~
+
+1. v4 data inside v4 tunnel (using mcrx-check from https://github.com/GrumpyOldTroll/libmcrx):
+
+~~~
+# point source of (S,G) to docker:
+# (NB: use the group's route instead for some apps like VLC)
+sudo ip route add 23.212.185.0/24 dev docker0
+
+docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 4 $(python3 ~/libmcrx/driad.py -f 4 23.212.185.2) 
+sleep 1
+libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.2 -c 0 -d 0 -v
+~~~
+
+2-4:
+
+For any use of v6 traffic you first need to enable v6 in docker:
+
+~~~
+# enable IPv6 using a /64 in a ULA prefix (RFC4193)
+cat <<EOF | sudo tee /etc/docker/daemon.json
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "$(python3 -c 'import os; import ipaddress; print(ipaddress.ip_network("fd%s:%s%s:%s%s::/64"%tuple("%02x"%b for b in os.urandom(5))))')"
+}
+EOF
+sudo systemctl reload docker
+~~~
+
+2. v6 data inside v4 tunnel:
+
+~~~
+# point source of (S,G) to docker:
+sudo ip -6 route add 2600:14e0::/48 dev docker0
+
+docker container run -it --rm --name amtgw --privileged \
+    grumpyoldtroll/amtgw -d 6 $(python3 ~/libmcrx/driad.py -f 4 2600:14e0::2)
+sleep 1
+libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
+~~~
+
+3. v6 data inside v6 tunnel:
+
+~~~
+# set up v6 nat for the ULA:
+DKRNET=$(grep fixed-cidr-v6 /etc/docker/daemon.json | awk '{print $2;}' | sed -e 's/"\([^"]*\)"/\1/')
+sudo ip6tables -t nat -A POSTROUTING -s ${DKRNET} ! -o docker0 -j MASQUERADE
+
+# point source of (S,G) to docker:
+sudo ip -6 route add 2600:14e0::/48 dev docker0
+
+docker container run -it --rm --name amtgw --privileged \
+    grumpyoldtroll/amtgw -d 6 -t 6 $(python3 ~/libmcrx/driad.py -f 6 2600:14e0::2)
+sleep 1
+libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
+~~~
+
+4. v4 data inside v6 tunnel:
+
+~~~
+# set up v6 nat for the ULA:
+DKRNET=$(grep fixed-cidr-v6 /etc/docker/daemon.json | awk '{print $2;}' | sed -e 's/"\([^"]*\)"/\1/')
+sudo ip6tables -t nat -A POSTROUTING -s ${DKRNET} ! -o docker0 -j MASQUERADE
+
+# point source of (S,G) to docker:
+sudo ip route add 23.212.185.0/24 dev docker0
+docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 6 $(python3 ~/libmcrx/driad.py -f 6 23.212.185.2) 
+sleep 1
+libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.2 -c 0 -d 0 -v
+~~~
