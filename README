@@ -98,7 +98,7 @@ sudo systemctl reload docker
 # point source of (S,G) to docker:
 sudo ip -6 route add 2600:14e0::/48 dev docker0
 
-docker container run -it --rm --name amtgw --privileged \
+docker container run -d --rm --name amtgw --privileged \
     grumpyoldtroll/amtgw -d 6 $(python3 ~/libmcrx/driad.py -f 4 2600:14e0::2)
 sleep 1
 libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
@@ -114,7 +114,7 @@ sudo ip6tables -t nat -A POSTROUTING -s ${DKRNET} ! -o docker0 -j MASQUERADE
 # point source of (S,G) to docker:
 sudo ip -6 route add 2600:14e0::/48 dev docker0
 
-docker container run -it --rm --name amtgw --privileged \
+docker container run -d --rm --name amtgw --privileged \
     grumpyoldtroll/amtgw -d 6 -t 6 $(python3 ~/libmcrx/driad.py -f 6 2600:14e0::2)
 sleep 1
 libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
