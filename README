@@ -72,9 +72,9 @@ docker build -t amtgw:latest -f gateway/docker/Dockerfile .
 # (NB: use the group's route instead for some apps like VLC)
 sudo ip route add 23.212.185.0/24 dev docker0
 
-docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 4 $(python3 ~/libmcrx/driad.py -f 4 23.212.185.2) 
+docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 4 $(python3 ~/libmcrx/driad.py -f 4 23.212.185.6) 
 sleep 1
-libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.2 -c 0 -d 0 -v
+libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.6 -c 0 -d 0 -v
 ~~~
 
 2-4:
@@ -99,9 +99,9 @@ sudo systemctl reload docker
 sudo ip -6 route add 2600:14e0::/48 dev docker0
 
 docker container run -d --rm --name amtgw --privileged \
-    grumpyoldtroll/amtgw -d 6 $(python3 ~/libmcrx/driad.py -f 4 2600:14e0::2)
+    grumpyoldtroll/amtgw -d 6 $(python3 ~/libmcrx/driad.py -f 4 2600:14e0::6)
 sleep 1
-libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
+libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::6 -c 0 -d 0 -v
 ~~~
 
 3. v6 data inside v6 tunnel:
@@ -118,9 +118,9 @@ sudo ip6tables -t nat -A POSTROUTING -s ${DKRNET} ! -o docker0 -j MASQUERADE
 sudo ip -6 route add 2600:14e0::/48 dev docker0
 
 docker container run -d --rm --name amtgw --privileged \
-    grumpyoldtroll/amtgw -d 6 -t 6 $(python3 ~/libmcrx/driad.py -f 6 2600:14e0::2)
+    grumpyoldtroll/amtgw -d 6 -t 6 $(python3 ~/libmcrx/driad.py -f 6 2600:14e0::6)
 sleep 1
-libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::2 -c 0 -d 0 -v
+libmcrx/mcrx-check -g ff3e::8000:1 -p 5001 -s 2600:14e0::6 -c 0 -d 0 -v
 ~~~
 
 4. v4 data inside v6 tunnel:
@@ -132,7 +132,7 @@ sudo ip6tables -t nat -A POSTROUTING -s ${DKRNET} ! -o docker0 -j MASQUERADE
 
 # point source of (S,G) to docker:
 sudo ip route add 23.212.185.0/24 dev docker0
-docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 6 $(python3 ~/libmcrx/driad.py -f 6 23.212.185.2) 
+docker container run -d --rm --name amtgw --privileged amtgw:latest -d 4 -t 6 $(python3 ~/libmcrx/driad.py -f 6 23.212.185.6) 
 sleep 1
-libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.2 -c 0 -d 0 -v
+libmcrx/mcrx-check -g 232.1.1.1 -p 5001 -s 23.212.185.6 -c 0 -d 0 -v
 ~~~
