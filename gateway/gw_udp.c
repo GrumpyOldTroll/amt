@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/queue.h>
 
 #include "igmp.h"  // copied from freebsd--linux doesn't have v3 in 2017
 #include "amt.h"
@@ -181,11 +182,26 @@ gw_request_timeout(int fd, short __unused event, void* uap)
          * Mark that the relay discovery is in progress
          */
         gw->relay = RELAY_DISCOVERY_INPROGRESS;
+        /*
+         * stupidly, linux's sys/queue.h does not have TAILQ_FOREACH_SAFE
+         * (c.f. https://man7.org/linux/man-pages/man3/tailq.3.html, search
+         * for "BUGS"), so you have eto do something stupid to remove
+         * entries safely.  --jake 2022-04-30
+         */
+        request_t* deferred_remove = NULL;
         TAILQ_FOREACH(rq, &gw->request_head, rq_next)
         {
             if (rq->rq_tev && evtimer_pending(rq->rq_tev, NULL)) {
-                gw_request_free(rq);
+              if (deferred_remove) {
+                TAILQ_REMOVE(&gw->request_head, deferred_remove, rq_next);
+                gw_request_free(deferred_remove);
+              }
+              deferred_remove = rq;
             }
+        }
+        if (deferred_remove) {
+          TAILQ_REMOVE(&gw->request_head, deferred_remove, rq_next);
+          gw_request_free(deferred_remove);
         }
         /*
          * start a periodic relay discovery timer
