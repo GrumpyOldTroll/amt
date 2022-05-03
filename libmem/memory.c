@@ -60,7 +60,8 @@ mem_type_init(int size, const char* name)
     TAILQ_INSERT_TAIL(&mem_head, mb, m_next);
 
     mb->m_size = size;
-    strncpy(mb->m_name, name, MAX_MEM_NAME);
+    strncpy(mb->m_name, name, MAX_MEM_NAME-1);
+    mb->m_name[MAX_MEM_NAME-1] = 0;
 
     return mb;
 }
